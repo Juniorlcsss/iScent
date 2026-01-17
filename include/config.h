@@ -11,6 +11,10 @@
 //https://github.com/boschsensortec/Bosch-BSEC2-Library/tree/master/examples/bme68x_demo_sample
 
 
+//version info
+#define SOFTWARE_VERSION "1.0.0"
+
+
 //===========================================================================================================
 //pin definitions
 //===========================================================================================================
@@ -26,13 +30,15 @@
 #define BME688_PRIMARY_ADDR 0x76
 #define BME688_SECONDARY_ADDR 0x77
 
+#define I2C_FREQUENCY_HZ 400000L
+
 //display
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
 #define DISPLAY_I2C_ADDR 0x3C
 #define DISPLAY_RESET_PIN -1
 
-//interaction buttoms
+//interaction buttons
 #define BUTTON_SELECT_PIN 9 //GP6
 #define BUTTON_DOWN_PIN 10 //GP7
 #define BUTTON_DEBOUNCE_MS 50
@@ -64,7 +70,7 @@ static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {300, 
 #define BME688_SAMPLE_RATE 3000
 #define BME688_GAS_BASE_SAMPLES 50
 #define BME688_WARMUP_SAMPLES 10
-#define BME688_STALE_MS 6000
+#define BME688_STABLE_MS 6000
 
 typedef enum{
     MODE_SLEEP = 0,
@@ -183,7 +189,7 @@ typedef enum{
     ERROR_DISPLAY_INIT,
     ERROR_SD_INIT,
     ERROR_SENSOR_READ,
-    ERROR_FILE_SYSTEM,
+    ERROR_FILE_SYSTEM_INIT,
     ERROR_SENSOR_TIMEOUT,
     ERROR_FILE_WRITE,
     ERROR_MEMORY_ALLOC,
