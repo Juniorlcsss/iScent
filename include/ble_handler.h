@@ -11,6 +11,7 @@
 #endif
 
 class BLEHandler {
+public:
     BLEHandler();
     ~BLEHandler();
 
@@ -67,7 +68,7 @@ private:
 
     bool _init;
     bool _advertising;
-    uint8_t _connected_count;
+    uint8_t _connection_count;
     uint32_t _last_notify_time;
     uint32_t _notify_interval_ms;
 

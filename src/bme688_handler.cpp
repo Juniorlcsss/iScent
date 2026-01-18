@@ -1,4 +1,4 @@
-#include "bme668_handler.h"
+#include "bme688_handler.h"
 #include <LittleFS.h>
 
 #define CALIBRATION_FILE "/calibration.dat"
@@ -679,7 +679,10 @@ bool BME688Handler::loadCalibration(){
 //===========================================================================================================
 
 float BME688Handler::calculateIAQ(float gasRes, float hum){
-    //scale: 0-100 (0=clean, 500=polluted)
+    //scale: 0-500
+    /*
+    
+    */
 
     float gScore = 0.0f;
     float hScore = 0.0f;
@@ -705,8 +708,10 @@ float BME688Handler::calculateIAQ(float gasRes, float hum){
     else{
         hScore = 125.0f * (hum - 42.0f) / 58.0f;
     }
+    float rawIAQ = CONSTRAIN_FLOAT(gScore + hScore, 0.0f, 500.0f);
+    float daqi = CONSTRAIN_FLOAT(1.0f + (rawIAQ / 500.0f) * 9.0f, 1.0f, 10.0f);
 
-    return CONSTRAIN_FLOAT(gScore + hScore, 0.0f, 500.0f);
+    return daqi;
 }
 
 float BME688Handler::getGasRatio(float current, float base){
@@ -975,4 +980,43 @@ const char* BME688Handler::getLastErrorString() const{
 
 void BME688Handler::clearError(){
     _last_error = ERROR_NONE;
+}
+
+//===========================================================================================================
+//calculate gas ratio
+//===========================================================================================================
+
+uint16_t calculateIAQIndex(float gas, float hum){
+    return (uint16_t)BME688Handler::calculateIAQ(gas, hum);
+}
+
+bool detectVOCs(float current, float base, float threshold){
+    if(base <=0) return false;
+
+    float ratio = current / base;
+    return ratio < (1.0f - threshold);
+}
+
+float estimateCO2EQ(float gas_resistance, float baseline){
+    //simple estimation :PPP
+    if(baseline <=0 || gas_resistance <=0) return 400.0f; //default return
+
+    return 400.0f + (baseline / gas_resistance) * 2000.0f;
+}
+
+const char* getAirQualityString(float iaq){
+    //Base on check-air-quality.service.gov.uk
+    if(iaq >= 1.0f && iaq <= 3.0f){
+        return "Low";
+    }
+    else if(iaq > 3.0f && iaq <= 6.0f){
+        return "Moderate";
+    }
+    else if(iaq > 6.0f && iaq <= 9.0f){
+        return "High";
+    }
+    else if(iaq > 9.0f){
+        return "Very High";
+    }
+    return "Unknown";
 }

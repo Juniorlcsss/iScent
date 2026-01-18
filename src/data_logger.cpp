@@ -11,7 +11,7 @@ DataLogger::DataLogger():
     _file_entry_count(0),
     _file_index(0),
     _last_flush_time(0),
-    _auto_flush_interval(DATA_LOG_AUTO_FLUSH_INTERVAL),
+    _auto_flush_interval(DATA_LOG_FLUSH_INTERVAL_MS),
     _max_file_size(DATA_LOG_MAX_FILE_SIZE)
 {}
 
@@ -45,7 +45,7 @@ bool DataLogger::begin(){
     }
 
     //allocate buffer
-    _buffer new log_entry_t[_buffer_size];
+    _buffer = new log_entry_t[_buffer_size];
     if(_buffer == nullptr){
         DEBUG_PRINTLN(F("[DataLogger] Error: Buffer allocation failed"));
         return false;
@@ -58,8 +58,8 @@ bool DataLogger::begin(){
 
     while(dir.next()){
         String name = dir.fileName();
-        if(name.startsWith(DATA_LOG_FILENAME_PREFIX)){
-            int idx = name.substring(strlen(DATA_LOG_FILENAME_PREFIX) + 1, name.indexOf('.')).toInt();
+        if(name.startsWith(DATA_LOG_FILENAME)){
+            int idx = name.substring(strlen(DATA_LOG_FILENAME) + 1, name.indexOf('.')).toInt();
             if(idx >= _file_index){
                 _file_index = idx + 1;
             }
@@ -123,10 +123,10 @@ bool DataLogger::logEntry(const dual_sensor_data_t &data, const ml_prediction_t 
     memcpy(&entry.sensor_data, &data, sizeof(dual_sensor_data_t));
 
     if(pred != nullptr){
-        memcpy(&entry.prediction, pred, sizeof(ml_prediction_t));
+        memcpy(&entry.ml_prediction, pred, sizeof(ml_prediction_t));
     }
     else{
-        memset(&entry.prediction, 0, sizeof(ml_prediction_t));
+        memset(&entry.ml_prediction, 0, sizeof(ml_prediction_t));
     }
 
     //iaq
@@ -192,7 +192,7 @@ bool DataLogger::isBufferFull() const{
     return _buffer_count >= _buffer_size;
 }
 
-size_t getUsedSpace() const{
+size_t getUsedSpace() {
     FSInfo info;
     if(LittleFS.info(info)){
         return info.usedBytes;
@@ -200,7 +200,7 @@ size_t getUsedSpace() const{
     return 0;
 }
 
-size_t getFreeSpace() const{
+size_t getFreeSpace() {
     FSInfo info;
     if(LittleFS.info(info)){
         return info.totalBytes - info.usedBytes;
@@ -243,7 +243,7 @@ bool DataLogger::closeLogFile(){
     return true;
 }
 
-String DataLogger::getCurrentFileName() const{
+String DataLogger::getCurrentFilename() const {
     return _current_filename;
 }
 
@@ -260,7 +260,7 @@ uint32_t DataLogger::getTotalLoggedEntries() const{
 
 String DataLogger::generateFilename(){
     char filename[32];
-    snprintf(filename, sizeof(filename), "%s_%04d.csv",DATA_LOG_FILENAME_PREFIX, _file_index++);
+    snprintf(filename, sizeof(filename), "%s_%04d.csv",DATA_LOG_FILENAME, _file_index++);
     return String(filename);
 }
 
@@ -285,7 +285,7 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     }
 
     //timestamp
-    _log_file.print("%lu",entry.timestamp);
+    _log_file.printf("%lu",entry.timestamp);
 
     //sensor data
     _log_file.printf("%.2f,%.2f,%.2f,",
@@ -312,15 +312,15 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     //deltas
     _log_file.printf("%.2f,%.2f,%.2f,%.0f,",
     entry.sensor_data.delta_temp,
-    entry.sensor_data.delta_humidity,
-    entry.sensor_data.delta_pressure,
+    entry.sensor_data.delta_hum,
+    entry.sensor_data.delta_pres,
     entry.sensor_data.delta_gas_avg);
 
     //prediction
     _log_file.printf("%d,%.4f,%.4f,",
-    entry.prediction.predicted_class,
-    entry.prediction.confidence,
-    entry.prediction.anomaly_score);
+    entry.ml_prediction.predictedClass,
+    entry.ml_prediction.confidence,
+    entry.ml_prediction.anomalyScore);
 
     //iaq
     _log_file.printf("%d\n", entry.iaq_index);
@@ -375,7 +375,7 @@ bool DataLogger::listLogFiles(String *files, uint8_t max, uint8_t &count){
 
     while(dir.next() && count < max){
         String name = dir.fileName();
-        if(name.startsWith(DATA_LOG_FILENAME_PREFIX)){
+        if(name.startsWith(DATA_LOG_FILENAME)){
             files[count++] = name;
         }
     }
@@ -407,12 +407,12 @@ bool DataLogger::deleteAllLogFiles(){
         return false;
     }
 
-    stopLogging()
+    stopLogging();
 
     Dir dir = LittleFS.openDir("/");
     while(dir.next()){
         String name = dir.fileName();
-        if(name.startsWith(DATA_LOG_FILENAME_PREFIX)){
+        if(name.startsWith(DATA_LOG_FILENAME)){
             LittleFS.remove(name);
             DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", name.c_str());
         }

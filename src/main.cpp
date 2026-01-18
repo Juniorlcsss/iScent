@@ -73,8 +73,8 @@ void setup(){
     delay(1000);
 
     
-    DEBUG_PRINTLN(F("\n\n"))
-    DEBUG_PRINTLN(F("==== iScent ===="))
+    DEBUG_PRINTLN(F("\n\n"));
+    DEBUG_PRINTLN(F("==== iScent ===="));
     DEBUG_PRINTF("Firmware Version: %s\n", SOFTWARE_VERSION);
 
 
@@ -306,7 +306,7 @@ void enterState(system_state_t newState){
             break;
 
         case STATE_CALIBRATING:
-            sensors.startCalibration(NBME688_GAS_BASE_SAMPLES);
+            sensors.startCalibration(BME688_GAS_BASE_SAMPLES);
             break;
 
         case STATE_LOGGING:
@@ -386,6 +386,10 @@ void performInference(){
 //===========================================================================================================
 //button handling
 //===========================================================================================================
+void handleButtons(){
+    //literally does nothing but required to compile :///
+}
+
 void buttonCallback(button_id_t button, button_event_t event){
     display.resetTimeout();
 
@@ -470,55 +474,45 @@ void handleBLE(){
     ble.update();
 
     if(ble.hasNewConfig()){
-        String cfg = ble.getRecievedConfig();
-        DEBUG_PRINTLN("[BLE] Received new config via BLE: %s", cfg.c_str());
+        String cfg = ble.getReceivedConfig();
+        DEBUG_PRINTF("[BLE] Received new config via BLE: %s", cfg.c_str());
 
         //apply config here
-        applyBLEConfig(cfg);
-    }
-}
-
-void applyBLEConfig(String cfg){
-    switch(cfg){
-        case (cfg.startsWith("CALIB")):
+        if(cfg.startsWith("CALIB")){
             enterState(STATE_CALIBRATING);
-            break;
-
-        case (cfg.startsWith("LOG:ON")):
+        }
+        else if(cfg.startsWith("LOG:ON")){
             enterState(STATE_LOGGING);
-            break;
-
-        case (cfg.startsWith("LOG:OFF")):
+        }
+        else if(cfg.startsWith("LOG:OFF")){
             if(currentState == STATE_LOGGING){
                 enterState(STATE_IDLE);
             }
-            break;
-
-        case (cfg.startsWith("PROFILE:")): 
-            String profile = cfg.substring(8);
-
-            if(profile == "VOC"){
-                sensors.setVOCHeaterProfile();
-            }
-            else if(profile == "FOOD"){
-                sensors.setFoodHeaterProfile();
-            }
-            else{
-                sensors.setDefaultHeaterProfile();
-            }
-            break;
-
-        case (cfg.startsWith("LABEL:")):
+        }
+        else if(cfg.startsWith("LABEL:")){
             int l = cfg.substring(6).toInt();
-            if(l >=0 && l < SCENT_CLASS_COUNT){
+            if(l >= 0 && l < SCENT_CLASS_COUNT){
                 ml.setDataCollectionMode(true);
                 ml.setCurrentLabel((scent_class_t)l);
             }
-            break;
-
-        default:
-            DEBUG_PRINTLN("[BLE] Undefined config command received: %s", cfg.c_str());
-            break;
+        }
+        else if(cfg.startsWith("PROFILE:")){
+            String pf = cfg.substring(8);
+            DEBUG_PRINTF("[BLE] Received profile change command: %s\n", pf.c_str());
+            if(pf == "VOC"){
+                DEBUG_PRINTLN("[BLE] Setting VOC Heater Profile");
+                sensors.setVOCHeaterProfile();
+            }
+            else if(pf=="FOOD"){
+                DEBUG_PRINTLN("[BLE] Setting Food Heater Profile");
+                sensors.setFoodHeaterProfile();
+            }
+            else{
+                //assume default
+                DEBUG_PRINTLN("[BLE] Setting Default Heater Profile");
+                sensors.setDefaultHeaterProfile();
+            }
+        }
     }
 }
 
@@ -566,7 +560,7 @@ void updateDisplay(){
             break;
 
         default:
-            display.showStatus(currentState, lastError);
+            display.showStatusScreen(currentState, lastError);
             break;
     }
 }
@@ -617,10 +611,8 @@ void printStatus(){
     DEBUG_PRINTF("State: %d\n", currentState);
     DEBUG_PRINTF("Last Error: %d\n", lastError);
     DEBUG_PRINTF("Logging Active: %s\n", loggingActive ? "Yes" : "No");
-    sensors.printSensorData();
-    ml.printStatus();
-    logger.printStatus();
-    ble.isConnected() ? DEBUG_PRINTLN("BLE: Connected") : DEBUG_PRINTLN("BLE: Not Connected");
+    DEBUG_PRINTF("Samples: %lu\n", sensors.getSampleCount());
+    DEBUG_PRINTF("Inferences: %lu\n", ml.getTotalInferences());
     DEBUG_PRINTF("FREE RAM: %d bytes\n", rp2040.getFreeHeap());
     DEBUG_PRINTLN("=======================\n");
 }

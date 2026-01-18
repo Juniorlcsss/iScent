@@ -32,12 +32,12 @@ DisplayHandler::~DisplayHandler() {
 //init
 //===========================================================================================================
 bool DisplayHandler::begin(TwoWire *wire){
-    DEBUG_PRINTLN(F("[DisplayHandler] Initializing display..."));
+    DEBUG_PRINTLN(F("[DisplayHandler] Initializing display...")); 
 
     _wire = wire;
     _dsp = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, _wire, DISPLAY_RESET_PIN);
 
-    if(!_dsp->begin(SDD1306_SWITCHAPVCC, DISPLAY_I2C_ADDR)){
+    if(!_dsp->begin(SSD1306_SWITCHCAPVCC, DISPLAY_I2C_ADDR)){
         DEBUG_PRINTLN(F("[DisplayHandler] Display init failed!"));
         delete _dsp;
         _dsp = nullptr;
@@ -138,11 +138,11 @@ void DisplayHandler::showSplashScreen(){
 }
 
 void DisplayHandler::showStatusScreen(system_state_t state, error_code_t error){
-    if(!ready) return;
+    if(!_ready) return;
     clear();
     drawHeader("Status");
 
-    _dsp-<setCursor(0,16);
+    _dsp->setCursor(0,16);
     _dsp->print("System State:");
 
     switch(state){
@@ -193,7 +193,7 @@ void DisplayHandler::showStatusScreen(system_state_t state, error_code_t error){
     _dsp->printf("Uptime: %lus", millis() / 1000);
 
     _dsp->setCursor(0,50);
-    _dsp->printf("Free Mem: %lukb", getFreeMemory() / 1024);
+    _dsp->printf("Free Mem: %lukb", rp2040.getFreeHeap() / 1024);
 
     refresh();
 }
@@ -206,15 +206,15 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
     //primary data
     _dsp->setCursor(0, 16);
     _dsp->print("Primary: ");
-    _dsp->printf("T:%.1fC, H:%.1f%%\n", data.primary.temperature, data.primary.humidity);
-    _dsp->printf("P:%.1fPa, G:%.1fOhm\n", data.primary.pressure, data.primary.gas_resistance);
+    _dsp->printf("T:%.1fC, H:%.1f%%\n", data.primary.temperatures[0], data.primary.humidities[0]);
+    _dsp->printf("P:%.1fPa, G:%.1fOhm\n", data.primary.pressures[0], data.primary.gas_resistances[0]);
 
     //secondary data
     if(data.secondary.complete){
         _dsp->setCursor(0, 40);
         _dsp->print("Secondary: ");
-        _dsp->printf("T:%.1fC, H:%.1f%%\n", data.secondary.temperature, data.secondary.humidity);
-        _dsp->printf("P:%.1fPa, G:%.1fOhm\n", data.secondary.pressure, data.secondary.gas_resistance);
+        _dsp->printf("T:%.1fC, H:%.1f%%\n", data.secondary.temperatures[0], data.secondary.humidities[0]);
+        _dsp->printf("P:%.1fPa, G:%.1fOhm\n", data.secondary.pressures[0], data.secondary.gas_resistances[0]);
     }
 
     //deltas
@@ -223,7 +223,7 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
 }
 
 void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dual_sensor_data_t &data){
-    if(!ready) return;
+    if(!_ready) return;
 
     clear();
     drawHeader("Detection");
@@ -322,7 +322,7 @@ void DisplayHandler::showCalibrationScreen(float progress, const char* msg){
 
 
 void DisplayHandler::showSettingsScreen(){
-    if(!ready) return;
+    if(!_ready) return;
     clear();
     drawHeader("Settings");
 
@@ -342,7 +342,7 @@ void DisplayHandler::showLoggingScreen(uint32_t samples, bool active){
     drawHeader("Data Logging");
 
     _dsp->setCursor(0,16);
-    _dsp->print("Status: %s", active ? "Active" : "Inactive");
+    _dsp->printf("Status: %s", active ? "Active" : "Inactive");
     _dsp->printf("Samples Logged: %lu", samples);
 
     if(active){
@@ -372,14 +372,14 @@ void DisplayHandler::ShowErrorScreen(error_code_t error){
 
 void DisplayHandler::drawProgressBar(int16_t x, int16_t y, int16_t w, int16_t h, float progress, const char *label){
     if(!_ready) return;
-    progrss = CONSTRAIN_FLOAT(progress, 0.0f, 1.0f);
+    progress = CONSTRAIN_FLOAT(progress, 0.0f, 1.0f);
 
     //border
     _dsp->drawRect(x, y, w, h, SSD1306_WHITE);
     //fill
     int16_t fillW = (int16_t)(progress * (w-2));
-    if(!fillW >0){
-        DEBUG_PRINTLN_V("[DisplayHandler] drawProgressBar: fillW <= 0");
+    if(!(fillW >0)){
+        DEBUG_VERBOSE_PRINTLN("[DisplayHandler] drawProgressBar: fillW <= 0");
         return;
     }
     _dsp->fillRect(x+1, y+1, fillW, h-2, SSD1306_WHITE);
@@ -457,7 +457,7 @@ void DisplayHandler::printCentered(const char* text, int16_t y){
     int16_t x1,y1;
     uint16_t w,h;
     _dsp->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
-    _display->setCursor((DISPLAY_WIDTH - w)/2, y);
+    _dsp->setCursor((DISPLAY_WIDTH - w)/2, y);
     _dsp->print(text);
 }
 
@@ -514,7 +514,7 @@ void DisplayHandler::drawBatteryIcon(int16_t x, int16_t y, float volt){
         _dsp->fillRect(x+1, y+1, fillW, 6, SSD1306_WHITE);
     }
     else{
-        DEBUG_PRINTLN_V("[DisplayHandler]  Looks like someone forgot to change again");
+        DEBUG_VERBOSE_PRINTLN("[DisplayHandler]  Looks like someone forgot to change again");
     }
 
 }
@@ -522,22 +522,20 @@ void DisplayHandler::drawSignalIcon(int16_t x, int16_t y, int8_t rssi){
     if(!_ready) return;
 
     int8_t bars = 0;
-    switch(rssi){
-        case rssi >= -50:
-            bars = 4;
-            break;
-        case rssi >= -60:
-            bars = 3;
-            break;
-        case rssi >= -70:
-            bars = 2;
-            break;
-        case rssi >= -80:
-            bars = 1;
-            break;
-        default:
-            bars = 0;
-            break;
+    if(rssi >= -50){
+        bars = 4;
+    }
+    else if(rssi >= -60){
+        bars = 3;
+    }
+    else if(rssi >= -70){
+        bars = 2;
+    }
+    else if(rssi >= -80){
+        bars = 1;
+    }
+    else{
+        bars = 0;
     }
 
     for(int8_t i=0; i<4; i++){
@@ -620,7 +618,7 @@ uint8_t DisplayHandler::getSelectedMenuIndex() const{
 
 void DisplayHandler::setBrightness(uint8_t brightness){
     if(!_ready) return;
-    _brightness = CONSTRAIN_UINT8(brightness, 0, 255);
+    _brightness = CONSTRAIN_UINT8(brightness);
     _dsp->ssd1306_command(SSD1306_SETCONTRAST);
     _dsp->ssd1306_command(_brightness);
 }
@@ -638,7 +636,7 @@ void DisplayHandler::setTimeout(uint32_t timeout){
 void DisplayHandler::resetTimeout(){
     _prevActivity = millis();
     if(_timedOut){
-        timeOut = false;
+        _timedOut = false;
         _dsp->dim(false);
     }
 }

@@ -56,7 +56,7 @@ public:
     uint32_t getTotalLoggedEntries() const;//
     bool listLogFiles(String *files, uint8_t max, uint8_t &count);//
 
-    bool deleteLogFile(const String *filename);//
+    bool deleteLogFile(const char *filename);//
     bool deleteAllLogFiles();//
     bool exportToSerial(const char* filename);//
 

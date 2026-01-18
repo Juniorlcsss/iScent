@@ -254,30 +254,32 @@ static const char* ERROR_CODE_NAMES[] = {
 #define DEBUG_VERBOSE false
 
 #if DEBUG_ENABLED
-    #define DEBUG_PRINTLN(x) Serial.println(x)
+    #define DEBUG_PRINTLN(x)  Serial.println(x)
     #define DEBUG_PRINT(x) Serial.print(x)
     #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+    
     #if DEBUG_VERBOSE
-        #define DEBUG_PRINTLN_V(x) Serial.println(x)
-        #define DEBUG_PRINT_V(x) Serial.print(x)
-        #define DEBUG_PRINTF_V(...) Serial.printf(__VA_ARGS__)
+        #define DEBUG_VERBOSE_PRINTLN(x) Serial.println(x)
+        #define DEBUG_VERBOSE_PRINT(x) Serial.print(x)
+        #define DEBUG_VERBOSE_PRINTF(...) Serial.printf(__VA_ARGS__)
     #else
-        #define DEBUG_VERBOSE_PRINTLN_V(x)
-        #define DEBUG_VERBOSE_PRINT_V(x)
-        #define DEBUG_VERBOSE_PRINTF_V(...)
+        #define DEBUG_VERBOSE_PRINTLN(x)
+        #define DEBUG_VERBOSE_PRINT(x)
+        #define DEBUG_VERBOSE_PRINTF(...)
     #endif
 #else
     #define DEBUG_PRINTLN(x)
     #define DEBUG_PRINT(x)
     #define DEBUG_PRINTF(...)
-    #define DEBUG_VERBOSE_PRINTLN_V(x)
-    #define DEBUG_VERBOSE_PRINT_V(x)
-    #define DEBUG_VERBOSE_PRINTF_V(...)
+    #define DEBUG_VERBOSE_PRINTLN(x)
+    #define DEBUG_VERBOSE_PRINT(x)
+    #define DEBUG_VERBOSE_PRINTF(...)
 #endif
 
 //helper macro
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #define MAP_FLOAT(x, in_min, in_max, out_min, out_max) ((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 #define CONSTRAIN_FLOAT(x, min, max) ((x < min) ? min : ((x > max) ? max : x))
+#define CONSTRAIN_UINT8(x) ((x<0) ? 0 : ((x>255) ? 255 : x))
 
 #endif

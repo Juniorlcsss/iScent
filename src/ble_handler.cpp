@@ -61,7 +61,7 @@ BLEHandler::BLEHandler() :
 #endif
     _init(false),
     _advertising(false),
-    _connected_count(0),
+    _connection_count(0),
     _last_notify_time(0),
     _notify_interval_ms(BLE_NOTIFY_INTERVAL_MS),
     _new_config(false),
@@ -306,7 +306,7 @@ bool BLEHandler::hasNewConfig() const{
     return _new_config;
 }
 
-String BLEHandler::getRecievedConfig(){
+String BLEHandler::getReceivedConfig(){
     _new_config = false;
     return _received_config;
 }

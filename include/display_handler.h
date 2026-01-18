@@ -24,7 +24,7 @@ public:
     //===========================================================================================================
     //init
     //===========================================================================================================
-    bool begin();
+    bool begin(TwoWire *wire = &Wire);
     bool isReady() const;
 
     //===========================================================================================================
@@ -42,7 +42,7 @@ public:
     void clear();
     void refresh();
 
-    //per mode 
+    //per mode  
     void showSplashScreen();
     void showStatusScreen(system_state_t state, error_code_t error);
     void showSensorDataScreen(const dual_sensor_data_t &data);

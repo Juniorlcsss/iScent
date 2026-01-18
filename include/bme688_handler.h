@@ -250,14 +250,16 @@ private:
     float getStdDev(const float *data, uint8_t count, float mean);
 };
 
-//calculate gas resistance ratio
-uint16_t calculateIAQ(float gas_resistance, float humidity);
+//ccalc indoor air quality
+uint16_t calculateIAQIndex(float gas_resistance, float humidity);  
 
 //check sensor data for VOCs
 bool detectVOCs(float current, float base, float threshold=0.2f);
 
+//gas res to est co2
 float estimateCO2EQ(float gas_resistance, float baseline);
 
+//get air quality string
 const char* getAirQualityString(float iaq);
 
 #endif

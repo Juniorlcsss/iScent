@@ -8,7 +8,7 @@ MLInference::MLInference():
     _anomaly_threshold(ML_ANOMALY_THRESHOLD),
     _init(false),
     _data_collection_mode(false),
-    _current_label(SCENT_CLASS_NONE),
+    _current_label(SCENT_CLASS_UNKNOWN),
     _total_inferences(0),
     _total_inference_time_ms(0),
     _training_samples(nullptr),
@@ -106,7 +106,7 @@ bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data){
     //    _feature_buffer.features[feature_idx++] = stats[i] /1100.0f;
     //}
     //gas
-    extractGasFeatures(&_feature_buffer.features[feature_idx], _windowGasP, _window_size)
+    extractGasFeatures(&_feature_buffer.features[feature_idx], _windowGasP, _window_size);
     feature_idx += BME688_NUM_HEATER_STEPS * 3;
 
     //*Secondary sensor features
@@ -144,7 +144,7 @@ bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data){
     _feature_buffer.featureCount = feature_idx;
     _feature_buffer.ready = true;
 
-    DEBUG_VERBOSE_PRINTF_V("[MLInference] Extracted %d features\n", feature_idx);
+    DEBUG_VERBOSE_PRINTF("[MLInference] Extracted %d features\n", feature_idx);
 
     return true;
 
@@ -186,7 +186,7 @@ bool MLInference::addToWindow(const dual_sensor_data_t &sensor_data){
         _window_size++;
     }
 
-    if(_window_size >= ML_MIN_SAMPLES_FOR_INFERENCE){
+    if(_window_size >= ML_SAMPLES){
         return extractFeatures(sensor_data);
     }
 
@@ -211,14 +211,14 @@ bool MLInference::isFeatureBufferReady() const{
     return _feature_buffer.ready;
 }
 
-const char* MLInference::getClassName(scent_class_t classId){
+const char* MLInference::getClassName(scent_class_t classId) const{
     if(classId < SCENT_CLASS_COUNT){
         return SCENT_CLASS_NAMES[classId];
     }
     return "Unknown";
 }
 
-scent_class_t MLInference::getClassFromName(const char* name){
+scent_class_t MLInference::getClassFromName(const char* name) const{
     for(int i=0; i<SCENT_CLASS_COUNT; i++){
         if(strcmp(name, SCENT_CLASS_NAMES[i])==0){
             return (scent_class_t)i;
@@ -397,16 +397,20 @@ bool MLInference::runInference(ml_prediction_t &pred){
     pred.anomalyScore = ei_result.anomaly;
     pred.isAnomalous = (ei_result.anomaly > _anomaly_threshold);
 #endif
+    pred.valid = (pred.confidence >= _confidence_threshold);
 
 #else
     //without ei
     DEBUG_PRINTLN(F("[MLInference] Edge Impulse SDK not available, inference not possible"));
-    return false;
+    pred.predictedClass = SCENT_CLASS_UNKNOWN;
+    pred.confidence = 0.0f;
+    pred.valid = false;
+    pred.inferenceTimeMs = 0;
 
 #endif
 
     _total_inferences++;
-    _total_inference_time_ms += pred.inference_time_ms;
+    _total_inference_time_ms += pred.inferenceTimeMs;
     return pred.valid;
 }
 
@@ -445,7 +449,7 @@ bool MLInference::isDataCollectionMode() const{
 
 void MLInference::setCurrentLabel(scent_class_t label){
     _current_label = label;
-    DEBUG_PRINTF_V("[MLInference] Current data collection label set to %d\n", label);
+    DEBUG_VERBOSE_PRINTF("[MLInference] Current data collection label set to %d\n", label); 
 }
 
 bool MLInference::collectSample(const dual_sensor_data_t &data){
@@ -471,7 +475,7 @@ bool MLInference::collectSample(const dual_sensor_data_t &data){
     sample.timestamp = millis();
 
     _training_sample_count++;
-    DEBUG_PRINTF_V("[MLInference] Collected training sample %d with label %d\n",_training_sample_count, _current_label);
+    DEBUG_VERBOSE_PRINTF("[MLInference] Collected training sample %d with label %d\n",_training_sample_count, _current_label);
     return true;
 }
 
@@ -524,7 +528,7 @@ bool MLInference::exportTrainingData(const char* file){
     }
     f.close();
     LittleFS.end();
-    DEBUG_PRINTF_V("[MLInference] Exported %d training samples to %s\n", _training_sample_count, file);
+    DEBUG_VERBOSE_PRINTF("[MLInference] Exported %d training samples to %s\n", _training_sample_count, file);
     return true;
 }
 
