@@ -144,7 +144,7 @@ private:
     //===========================================================================================================
     void normaliseFeatures();
     void computeStats(float *data, const float *window, uint16_t size);
-    void extractGasFeatures(float *output, const float window[][BME_688_NUM_HEATER_STEPS], uint16_t size);
+    void extractGasFeatures(float *output, const float window[][BME688_NUM_HEATER_STEPS], uint16_t size);
 
     float computeMean(const float* data, uint16_t size);
     float computeSTD(const float* data, uint16_t size, float mean);

@@ -34,14 +34,14 @@ class BLEHandler {
     //transmit data
     //===========================================================================================================
     bool sendSensorData(const dual_sensor_data_t &data);
-    bool sendPrediction(coonst ml_preduction_t &prediction);
+    bool sendPrediction(const ml_prediction_t &prediction);
     bool sendStatus(system_state_t state, error_code_t error);
 
     //===========================================================================================================
     //reception
     //===========================================================================================================
     bool hasNewConfig() const;
-    String getRecievedConfig();
+    String getReceivedConfig();
 
     //===========================================================================================================
     //update
@@ -71,7 +71,7 @@ private:
     uint32_t _last_notify_time;
     uint32_t _notify_interval_ms;
 
-    String _recieved_config;
+    String _received_config;
     bool _new_config;
     String _device_name;
 

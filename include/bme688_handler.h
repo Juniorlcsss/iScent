@@ -79,7 +79,7 @@ public:
 //init sensors
 //===========================================================================================================
     bool begin(TwoWire* primary_wire = &Wire, TwoWire* secondary_wire = &Wire);
-    bool beginSingle(TwoWire* wire = &Wire ,uint8_t addr);
+    bool beginSingle(TwoWire* wire = &Wire ,uint8_t addr = BME688_PRIMARY_ADDR);
     bool isReady() const;
     bool isPrimaryReady() const;
     bool isSecondaryReady() const;

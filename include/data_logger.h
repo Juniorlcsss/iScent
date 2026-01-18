@@ -5,7 +5,7 @@
 #include "config.h"
 #include <LittleFS.h>
 #include "ml_inference.h"
-#include "bme668_handler.h"
+#include "bme688_handler.h"
 
 //log struct
 typedef struct{

@@ -106,16 +106,28 @@ typedef enum{
 //total features
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
 #define ML_DELTA_FEATURES (ML_FEATURE_COUNT)
-#define TOTAL_FEATURES (ML_RAW_FEATURES * ML_SENSOR_COUNT + ML_DELTA_FEATURES)
+#define TOTAL_ML_FEATURES (ML_RAW_FEATURES * ML_SENSOR_COUNT + ML_DELTA_FEATURES)
 
 //tea classification labels
-typedef enum{
-    SCENT_CLASS_NONE = 0,
+typedef enum {
+    SCENT_CLASS_UNKNOWN = 0,
+    SCENT_CLASS_TYPE_1,
+    SCENT_CLASS_TYPE_2,
+    SCENT_CLASS_TYPE_3,
+    SCENT_CLASS_TYPE_4,
+    SCENT_CLASS_TYPE_5,
+    SCENT_CLASS_TYPE_6,
     SCENT_CLASS_COUNT
 } scent_class_t;
+
 static const char* SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
-    "None",
-    "tea"
+    "Unknown",
+    "Type 1",
+    "Type 2",
+    "Type 3",
+    "Type 4",
+    "Type 5",
+    "Type 6"
 };
 
 //===========================================================================================================
