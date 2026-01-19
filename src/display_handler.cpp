@@ -32,7 +32,7 @@ DisplayHandler::~DisplayHandler() {
 //init
 //===========================================================================================================
 bool DisplayHandler::begin(TwoWire *wire){
-    DEBUG_PRINTLN(F("[DisplayHandler] Initializing display...")); 
+    DEBUG_PRINTLN(F("[DisplayHandler] Initialising display...")); 
 
     _wire = wire;
     _dsp = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, _wire, DISPLAY_RESET_PIN);
@@ -52,7 +52,7 @@ bool DisplayHandler::begin(TwoWire *wire){
     _ready = true;
     _prevActivity = millis();
     showSplashScreen();
-    DEBUG_PRINTLN(F("[DisplayHandler] Display initialized successfully."));
+    DEBUG_PRINTLN(F("[DisplayHandler] Display initialised successfully."));
     return true;
 }
 
@@ -127,13 +127,13 @@ void DisplayHandler::showSplashScreen(){
 
     //draw
     _dsp->setTextSize(2);
-    printCentered("iScent", 10);
+    printCentered("iScent", 5);
 
     _dsp->setTextSize(1);
-    printCentered("Portable Sniffer", 40);
+    printCentered("Portable Sniffer", 30);
     String ver = String("v") + String(SOFTWARE_VERSION);
-    printCentered(ver.c_str(), 50);
-    printCentered("Initializing...", 60);
+    printCentered(ver.c_str(), 40);
+    printCentered("Initialising...", 50);
     refresh();
 }
 
@@ -142,21 +142,24 @@ void DisplayHandler::showStatusScreen(system_state_t state, error_code_t error){
     clear();
     drawHeader("Status");
 
-    _dsp->setCursor(0,16);
-    _dsp->print("System State:");
+    _dsp->setTextSize(1);
+    int16_t y = 16;
+
+    _dsp->setCursor(0,y);
+    _dsp->print("State:");
 
     switch(state){
         case STATE_INIT:
-            _dsp->println("Initialising");
+            _dsp->println("Init");
             break;
         case STATE_WARMUP:
-            _dsp->println("Warming Up");
+            _dsp->println("WarmUp");
             break;
         case STATE_IDLE:
             _dsp->println("Idle");
             break;
         case STATE_CALIBRATING:
-            _dsp->println("Calibrating");
+            _dsp->println("Calibr");
             break;
         case STATE_SAMPLING:
             _dsp->println("Sampling");
@@ -165,10 +168,10 @@ void DisplayHandler::showStatusScreen(system_state_t state, error_code_t error){
             _dsp->println("Inferencing");
             break;
         case STATE_LOGGING:
-            _dsp->println("Logging Data");
+            _dsp->println("Logging");
             break;
         case STATE_BLE_CONNECTED:
-            _dsp->println("BLE Connected");
+            _dsp->println("BLE Conn");
             break;
         case STATE_SLEEP:
             _dsp->println("Sleep");
@@ -180,20 +183,24 @@ void DisplayHandler::showStatusScreen(system_state_t state, error_code_t error){
             _dsp->println("Unknown");
             break;
     }
+    y+=9;
 
     //error display
     if(error != ERROR_NONE){
-        _dsp->setCursor(0,20);
-        _dsp->print("Error: ");
+        _dsp->setCursor(0,y);
+        _dsp->print("Err: ");
         _dsp->println(ERROR_CODE_NAMES[error]);
+        y+=9;
     }
 
     //sys info
-    _dsp->setCursor(0,40);
-    _dsp->printf("Uptime: %lus", millis() / 1000);
-
-    _dsp->setCursor(0,50);
-    _dsp->printf("Free Mem: %lukb", rp2040.getFreeHeap() / 1024);
+    _dsp->setCursor(0,y);
+    _dsp->printf("Up: %lus", millis() / 1000);
+    
+    y+=9;
+    
+    _dsp->setCursor(0,y);
+    _dsp->printf("Mem: %lukb", rp2040.getFreeHeap() / 1024);
 
     refresh();
 }
