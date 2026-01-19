@@ -65,6 +65,12 @@ public:
     void printCentered(const char* txt, int16_t y);
     void printRight(const char* txt, int16_t y);
 
+    //scalers
+    int16_t scaleX(float ratio) const;
+    int16_t scaleY(float ratio) const;
+    int16_t scaleWidth(float ratio) const;
+    int16_t scaleHeight(float ratio) const;
+
     //===========================================================================================================
     //menu nav
     //===========================================================================================================

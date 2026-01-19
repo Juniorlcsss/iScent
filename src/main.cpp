@@ -133,7 +133,7 @@ void initialiseSystem(){
     }
 
     display.showSplashScreen();
-    delay(DISPLAY_SPASH_DURATION_MS);
+    delay(DISPLAY_SPLASH_DURATION_MS);
 
 
     //init buttons

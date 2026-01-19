@@ -3,11 +3,11 @@
 #if BLE_ENABLED
 
 //Server callbacks
-class BLEHandler::ServerCallbacks : public NimBLEServrCallbacks{
+class BLEHandler::ServerCallbacks : public NimBLEServerCallbacks{
 public:
     BLEHandler *handler;
 
-    ServerCallbacks(BLEHandler *h) : Handler(h){}
+    ServerCallbacks(BLEHandler *h) : handler(h){}
 
     //connect
     void onConnect(NimBLEServer *s) override{
@@ -39,9 +39,9 @@ public:
 
     void onWrite(NimBLECharacteristic *c) override{
         std::string value = c->getValue();
-        if(value.length() == 0){
+        if(value.length() > 0){
             handler->_received_config = String(value.c_str());
-            handler->_has_new_config = true;
+            handler->_new_config = true;
             DEBUG_PRINTF("[BLE] Config received: %s\n", handler->_received_config.c_str());
         }
         
@@ -99,7 +99,7 @@ bool BLEHandler::begin(){
     //char
     _char_sensor = _service->createCharacteristic(BLE_CHAR_SENSOR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     _char_prediction = _service->createCharacteristic(BLE_CHAR_PREDICTION_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-    _char_config = _service->createCharacteristic(BLE_CHAR_CONFIG_UUID< NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+    _char_config = _service->createCharacteristic(BLE_CHAR_CONFIG_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
     _char_config->setCallbacks(new ConfigCallbacks(this));
 
     //start
@@ -224,7 +224,7 @@ bool BLEHandler::sendSensorData(const dual_sensor_data_t &data){
 
     //prepare data
     char buffer[256];
-    snprintf(buffer, sizeof(buffer), "{\"t\":%.1f,\"h\":%.1f,\"g\":%.0f,\"dt\":%.1f,\"dg\":%.0f}", data.primary.temperatures[0],
+    snprintf(buffer, sizeof(buffer), "{\"t\":%.1f,\"h\":%.1f,\"g\":%.0f,\"dt\":%.1f,\"dg\":%.0f}", 
     data.primary.temperatures[0],data.primary.humidities[0],data.primary.gas_resistances[0],data.delta_temp,data.delta_gas_avg);
 
     _char_sensor->setValue((uint8_t*)buffer, strlen(buffer));
@@ -301,7 +301,7 @@ bool BLEHandler::sendStatus(system_state_t state, error_code_t error){
 //serial section
 bool BLEHandler::sendSensorDataSerial(const dual_sensor_data_t &data){
     char buffer[256];
-    snprintf(buffer, sizeof(buffer), "{\"t\":%.1f,\"h\":%.1f,\"g\":%.0f,\"dt\":%.1f,\"dg\":%.0f}", data.primary.temperatures[0],
+    snprintf(buffer, sizeof(buffer), "{\"t\":%.1f,\"h\":%.1f,\"g\":%.0f,\"dt\":%.1f,\"dg\":%.0f}", 
     data.primary.temperatures[0],data.primary.humidities[0],data.primary.gas_resistances[0],data.delta_temp,data.delta_gas_avg);
 
     Serial.println(buffer);

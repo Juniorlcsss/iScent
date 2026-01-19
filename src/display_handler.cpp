@@ -203,6 +203,7 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
     clear();
     drawHeader("Sensor Data");
 
+    if(!data.primary.complete) return;
     //primary data
     _dsp->setCursor(0, 16);
     _dsp->print("Primary: ");
@@ -236,7 +237,12 @@ void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dua
     if(pred.valid){
         _dsp->setTextSize(1);
         _dsp->setCursor(0,26);
-        _dsp->printf(SCENT_CLASS_NAMES[pred.predictedClass]);
+        if(pred.predictedClass < SCENT_CLASS_COUNT){
+            _dsp->printf(SCENT_CLASS_NAMES[pred.predictedClass]);
+        }
+        else{
+            _dsp->print("Unknown");
+        }
         //draw bar
         drawProgressBar(0,36,100,8,pred.confidence, "Confidence");
 
@@ -267,6 +273,11 @@ void DisplayHandler::showGraphScreen(const float* data, uint16_t count, const ch
     clear();
     drawHeader(title);
 
+    //bounds check
+    if(count ==0) return;
+    if(count > GRAPH_BUFFER_SIZE) count = GRAPH_BUFFER_SIZE;
+    if(data==nullptr) return;
+
     //find min and max
     float minVal = data[0], maxVal = data[0];
     for(uint16_t i=1; i<count; i++){
@@ -274,11 +285,11 @@ void DisplayHandler::showGraphScreen(const float* data, uint16_t count, const ch
         if(data[i] > maxVal) maxVal = data[i];
     }
 
-    //draw graph
-    int16_t graphX = 20;
-    int16_t graphY= 14;
-    int16_t graphW = DISPLAY_WIDTH - graphX-2;
-    int16_t graphH = DISPLAY_HEIGHT - graphY -10;
+    //scale graph
+    int16_t graphX = scaleX(0.15f);
+    int16_t graphY= scaleY(0.22f);
+    int16_t graphW = scaleWidth(0.85f);
+    int16_t graphH = scaleHeight(0.70f);
 
     //draw border
     _dsp->drawRect(graphX-1, graphY-1, graphW+2, graphH+2, SSD1306_WHITE);
@@ -288,12 +299,18 @@ void DisplayHandler::showGraphScreen(const float* data, uint16_t count, const ch
         range = 1.0f;
     }
 
-    for(uint16_t i=0; i<count && i < graphW; i++){
-        uint16_t x1 = graphX+i-1;
-        uint16_t x2 = graphX+i;
+    float pixelPerPoint = (float)graphW / count;
+    for(uint16_t i=0; i<count; i++){
+        uint16_t x1 = graphX+ (int16_t)(i * pixelPerPoint - pixelPerPoint);
+        uint16_t x2 = graphX+ (int16_t)(i*pixelPerPoint);
         uint16_t y1= graphY + graphH - (int16_t)((data[i-1]-minVal) / range * graphH);
         uint16_t y2= graphY + graphH - (int16_t)((data[i]-minVal) / range * graphH);
-        _dsp->drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+        
+        //bounds
+        if(x2 < DISPLAY_WIDTH){
+            _dsp->drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+        }
+
     }
 
     //y labels
@@ -372,20 +389,33 @@ void DisplayHandler::ShowErrorScreen(error_code_t error){
 
 void DisplayHandler::drawProgressBar(int16_t x, int16_t y, int16_t w, int16_t h, float progress, const char *label){
     if(!_ready) return;
+
+    if(w <= 2 || h <= 2){
+        DEBUG_VERBOSE_PRINTLN("[DisplayHandler] drawProgressBar: w or h too small");
+        return;
+    }
+    if(x <0 || y<0 || x+w > DISPLAY_WIDTH || y+h > DISPLAY_HEIGHT){
+        DEBUG_VERBOSE_PRINTLN("[DisplayHandler] drawProgressBar: out of bounds");
+        return;
+    }
+
     progress = CONSTRAIN_FLOAT(progress, 0.0f, 1.0f);
 
     //border
     _dsp->drawRect(x, y, w, h, SSD1306_WHITE);
     //fill
     int16_t fillW = (int16_t)(progress * (w-2));
-    if(!(fillW >0)){
+
+    if(fillW > 0){
+        _dsp->fillRect(x+1, y+1, fillW, h-2, SSD1306_WHITE);
+    }
+    else{
         DEBUG_VERBOSE_PRINTLN("[DisplayHandler] drawProgressBar: fillW <= 0");
         return;
     }
-    _dsp->fillRect(x+1, y+1, fillW, h-2, SSD1306_WHITE);
 
     //label
-    if(label != nullptr){
+    if(label != nullptr && (x+w+4) < DISPLAY_WIDTH){
         _dsp->setCursor(x+w+4, y+(h-8)/2);
         _dsp->print(label);
     }
@@ -393,9 +423,14 @@ void DisplayHandler::drawProgressBar(int16_t x, int16_t y, int16_t w, int16_t h,
 
 void DisplayHandler::drawBarGraph(int16_t x, int16_t y, int16_t h, int16_t w, const float* vals, uint8_t count, float maxVal){
     if(!_ready) return;
-    if(count ==0) return;
+    if(count ==0 || maxVal == 0) return;
+    if(vals == nullptr) return;
 
     int16_t barW = w / count;
+    if(barW <= 0){
+        DEBUG_VERBOSE_PRINTLN("[DisplayHandler] drawBarGraph: barW <= 0");
+        return;
+    }
 
     for(uint8_t i=0; i<count; i++){
         float v = CONSTRAIN_FLOAT((vals[i]/maxVal), 0.0f, 1.0f);
@@ -404,7 +439,12 @@ void DisplayHandler::drawBarGraph(int16_t x, int16_t y, int16_t h, int16_t w, co
         int16_t barX = x+i*barW;
         int16_t barY = y + h - barH;
         
-        _dsp->fillRect(barX, barY, barW-1, barH, SSD1306_WHITE);
+        if(barX >= 0 && barX+barW <= DISPLAY_WIDTH && barY >=0 && barY+barH <= DISPLAY_HEIGHT){
+            _dsp->fillRect(barX, barY, barW-1, barH, SSD1306_WHITE);
+        }
+        else{
+            DEBUG_VERBOSE_PRINTLN("[DisplayHandler] drawBarGraph: bar out of bounds");
+        }
     }
 
 }
@@ -548,12 +588,30 @@ void DisplayHandler::drawSignalIcon(int16_t x, int16_t y, int8_t rssi){
     }
 }
 
+int16_t DisplayHandler::scaleX(float percentage) const{
+    return (int16_t)(percentage * DISPLAY_WIDTH);
+}
+
+int16_t DisplayHandler::scaleY(float percentage) const{
+    return (int16_t)(percentage * DISPLAY_HEIGHT);
+}
+
+int16_t DisplayHandler::scaleWidth(float percentage) const{
+    return (int16_t)(percentage * DISPLAY_WIDTH);
+}
+
+int16_t DisplayHandler::scaleHeight(float percentage) const{
+    return (int16_t)(percentage * DISPLAY_HEIGHT);
+}
+
+
 //===========================================================================================================
 //menu nav
 //===========================================================================================================
 
 void DisplayHandler::showMenu(const menu_item_t *items, uint8_t itemCount, uint8_t selected){
     if(!_ready || itemCount == 0) return;
+    if(selected >= itemCount) selected = 0;
 
     _menuCount = itemCount;
     _menuSelection = selected;
@@ -577,6 +635,8 @@ void DisplayHandler::showMenu(const menu_item_t *items, uint8_t itemCount, uint8
 }
 
 void DisplayHandler::menuUp(){
+    if(_menuCount ==0) return;
+
     if(_menuSelection >0){
         _menuSelection--;
     }
@@ -587,6 +647,8 @@ void DisplayHandler::menuUp(){
 }
 
 void DisplayHandler::menuDown(){
+    if(_menuCount ==0) return;
+
     if(_menuSelection < _menuCount -1){
         _menuSelection++;
     }
@@ -597,7 +659,7 @@ void DisplayHandler::menuDown(){
 }
 
 void DisplayHandler::menuSelect(){
-    if(_menuItems !=nullptr && _menuSelection < _menuCount){
+    if(_menuItems !=nullptr && _menuSelection < _menuCount && _menuCount > 0){
         //call
         if(_menuItems[_menuSelection].action != nullptr){
             _menuItems[_menuSelection].action();
