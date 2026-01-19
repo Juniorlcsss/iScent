@@ -38,6 +38,11 @@ public:
     bool sendPrediction(const ml_prediction_t &prediction);
     bool sendStatus(system_state_t state, error_code_t error);
 
+    //via serial
+    bool sendSensorDataSerial(const dual_sensor_data_t &data);
+    bool sendPredictionSerial(const ml_prediction_t &prediction);
+    bool sendStatusSerial(system_state_t state, error_code_t error);
+
     //===========================================================================================================
     //reception
     //===========================================================================================================

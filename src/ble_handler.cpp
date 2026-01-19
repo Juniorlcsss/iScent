@@ -256,7 +256,7 @@ bool BLEHandler::sendPrediction(const ml_prediction_t &prediction){
     //prepare
     char buffer[128];
     snprintf(buffer, sizeof(buffer), "{\"c\":\"%s\",\"cf\":%.2f,\"an\":%d}",
-    SCENT_CLASS_NAMES[prediction.predicted_class], prediction.confidence, prediction.is_anomaly ? 1 : 0);
+    SCENT_CLASS_NAMES[prediction.predictedClass], prediction.confidence, prediction.isAnomalous ? 1 : 0);
 
     _char_prediction->setValue((uint8_t*)buffer, strlen(buffer));
     _char_prediction->notify();
@@ -297,6 +297,38 @@ bool BLEHandler::sendStatus(system_state_t state, error_code_t error){
     return false;
 #endif
 }
+
+//serial section
+bool BLEHandler::sendSensorDataSerial(const dual_sensor_data_t &data){
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer), "{\"t\":%.1f,\"h\":%.1f,\"g\":%.0f,\"dt\":%.1f,\"dg\":%.0f}", data.primary.temperatures[0],
+    data.primary.temperatures[0],data.primary.humidities[0],data.primary.gas_resistances[0],data.delta_temp,data.delta_gas_avg);
+
+    Serial.println(buffer);
+    DEBUG_PRINTLN(F("[BLE-Serial] Sensor data sent"));
+    return true;
+}
+
+bool BLEHandler::sendPredictionSerial(const ml_prediction_t &prediction){
+    char buffer[128];
+
+    snprintf(buffer, sizeof(buffer), "{\"c\":\"%s\",\"cf\":%.2f,\"an\":%d}",
+    SCENT_CLASS_NAMES[prediction.predictedClass], prediction.confidence, prediction.isAnomalous ? 1 : 0);
+
+    Serial.println(buffer);
+    DEBUG_PRINTLN(F("[BLE-Serial] Prediction data sent"));
+    return true;
+}
+
+bool BLEHandler::sendStatusSerial(system_state_t state, error_code_t error){
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "{\"st\":%d,\"er\":%d}", state, error);
+
+    Serial.println(buffer);
+    DEBUG_PRINTLN(F("[BLE-Serial] Status data sent"));
+    return true;
+}
+
 
 //===========================================================================================================
 //config
