@@ -13,6 +13,7 @@ typedef struct{
     dual_sensor_data_t sensor_data;
     ml_prediction_t ml_prediction;
     uint16_t iaq_index;
+    int16_t label; //-1 for none
 } log_entry_t;
 
 class DataLogger {
@@ -60,6 +61,10 @@ public:
     bool deleteAllLogFiles();//
     bool exportToSerial(const char* filename);//
 
+    //labels
+    void setActiveLabel(int16_t label);
+    int16_t getActiveLabel() const;
+
     //===========================================================================================================
     //cfg
     //===========================================================================================================
@@ -94,6 +99,7 @@ private:
     uint32_t _total_entries;
     uint32_t _file_entry_count;
     uint16_t _file_index;
+    int16_t _active_label;
 
     //===========================================================================================================
     //methods

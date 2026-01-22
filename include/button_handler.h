@@ -16,7 +16,6 @@ typedef enum{
 
 //button identifier types
 typedef enum{
-    BUTTON_UP=0,
     BUTTON_DOWN,
     BUTTON_SELECT,
     BUTTON_COUNT
@@ -32,6 +31,7 @@ typedef struct{
     uint32_t last_press_time;
     uint16_t press_count;
     button_event_t last_event;
+    bool active_low;
 } button_state_t;
 
 typedef void (*button_callback_t)(button_id_t button, button_event_t event);

@@ -32,6 +32,8 @@ ml_prediction_t currentPrediction;
 
 bool loggingActive = false;
 bool continuousInference = true;
+bool collectingLabeled = false;
+int16_t currentLabelSelection = SCENT_CLASS_TYPE_1;
 
 //===========================================================================================================
 //functions
@@ -49,19 +51,111 @@ void buttonCallback(button_id_t buttonId, button_event_t event);
 void printStatus();
 
 //menu actions
+void menuActionShowStatus();
+void menuActionShowSensorData();
+void menuActionShowPrediction();
+void menuActionShowGraph();
+void menuActionShowError();
+void menuActionDataCollection();
 void menuActionCalibrate();
 void menuActionToggleLogging();
 void menuActionSettings();
-void menuActionBack();
+
+//settings menu actions
+void settingsActionCalibrate();
+void settingsActionCycleHeaterProfile();
+void settingsActionCycleThresholdProfile();
+void settingsActionToggleDisplayProfile();
+void settingsActionExportData();
+void settingsActionBackToMain();
+void refreshSettingsMenu();
+void applyHeaterProfile(uint8_t index);
+
+//data collection menu actions
+void dataCollectActionCycleLabel();
+void dataCollectActionToggle();
+void dataCollectActionBack();
+void refreshDataCollectionMenu();
 
 //menu items
 menu_item_t main_menu_items[] = {
+    {"Status", menuActionShowStatus, DISPLAY_MODE_STATUS},
+    {"Sensor Data", menuActionShowSensorData, DISPLAY_MODE_SENSOR_DATA},
+    {"Prediction", menuActionShowPrediction, DISPLAY_MODE_PREDICTION},
+    {"Gas Graph", menuActionShowGraph, DISPLAY_MODE_GRAPH},
+    {"Data Collect", menuActionDataCollection, DISPLAY_MODE_DATA_COLLECTION},
     {"Calibrate", menuActionCalibrate, DISPLAY_MODE_CALIBRATION},
     {"Toggle Logging", menuActionToggleLogging, DISPLAY_MODE_LOGGING},
-    {"Settings", menuActionSettings, DISPLAY_MODE_SETTINGS},
-    {"Back", menuActionBack, DISPLAY_MODE_SENSOR_DATA}
+    {"Last Error", menuActionShowError, DISPLAY_MODE_ERROR},
+    {"Settings", menuActionSettings, DISPLAY_MODE_SETTINGS}
 };
 const uint8_t MAIN_MENU_COUNT = sizeof(main_menu_items)  /sizeof(menu_item_t);
+
+//settings menu labels (mutable for inline status)
+static char settingsLabelCalibrate[] = "Calibrate";
+static char settingsLabelHeater[24] = "Heater: Default";
+static char settingsLabelThreshold[28] = "ML Thr: Default";
+static char settingsLabelDisplay[24] = "Display: Normal";
+static char settingsLabelExport[] = "Export Last Log";
+static char settingsLabelBack[] = "Back";
+
+//data collection labels
+static char collectLabelSelect[24] = "Label: Type 1"; //TODO: Change from 'Type 1' to whatever the actual names are going to be
+static char collectLabelToggle[24] = "Start Collect";
+static char collectLabelBack[] = "Back";
+
+//heater profile cycling
+static const char* HEATER_PROFILE_NAMES[] = {"Default", "VOC", "Food"};
+static const uint8_t HEATER_PROFILE_COUNT = sizeof(HEATER_PROFILE_NAMES) / sizeof(HEATER_PROFILE_NAMES[0]);
+uint8_t currentHeaterProfileIndex = 0;
+
+//ml threshold presets
+typedef struct {
+    const char* name;
+    float confidence;
+    float anomaly;
+} threshold_profile_t;
+
+static const threshold_profile_t THRESHOLD_PROFILES[] = {
+    {"Default", ML_CONFIDENCE_THRESHOLD, ML_ANOMALY_THRESHOLD},
+    {"Sensitive", 0.55f, 0.25f},
+    {"Strict", 0.85f, 0.40f}
+};
+static const uint8_t THRESHOLD_PROFILE_COUNT = sizeof(THRESHOLD_PROFILES) / sizeof(THRESHOLD_PROFILES[0]);
+uint8_t currentThresholdProfileIndex = 0;
+
+//display profiles
+typedef struct {
+    const char* name;
+    uint8_t brightness;
+    bool inverted;
+} display_profile_t;
+
+static const display_profile_t DISPLAY_PROFILES[] = {
+    {"Normal", DISPLAY_CONTRAST, false},
+    {"Dim", (uint8_t)(DISPLAY_CONTRAST * 0.6f), false},
+    {"Invert", DISPLAY_CONTRAST, true}
+};
+static const uint8_t DISPLAY_PROFILE_COUNT = sizeof(DISPLAY_PROFILES) / sizeof(DISPLAY_PROFILES[0]);
+uint8_t currentDisplayProfileIndex = 0;
+
+//settings menu definitions
+menu_item_t settings_menu_items[] = {
+    {settingsLabelCalibrate, settingsActionCalibrate, DISPLAY_MODE_CALIBRATION},
+    {settingsLabelHeater, settingsActionCycleHeaterProfile, DISPLAY_MODE_SETTINGS},
+    {settingsLabelThreshold, settingsActionCycleThresholdProfile, DISPLAY_MODE_SETTINGS},
+    {settingsLabelDisplay, settingsActionToggleDisplayProfile, DISPLAY_MODE_SETTINGS},
+    {settingsLabelExport, settingsActionExportData, DISPLAY_MODE_SETTINGS},
+    {settingsLabelBack, settingsActionBackToMain, DISPLAY_MODE_MENU}
+};
+const uint8_t SETTINGS_MENU_COUNT = sizeof(settings_menu_items) / sizeof(menu_item_t);
+
+menu_item_t collect_menu_items[] = {
+    {collectLabelSelect, dataCollectActionCycleLabel, DISPLAY_MODE_DATA_COLLECTION},
+    {collectLabelToggle, dataCollectActionToggle, DISPLAY_MODE_DATA_COLLECTION},
+    {collectLabelBack, dataCollectActionBack, DISPLAY_MODE_MENU}
+};
+const uint8_t COLLECT_MENU_COUNT = sizeof(collect_menu_items) / sizeof(menu_item_t);
 
 //===========================================================================================================
 //setup
@@ -119,10 +213,10 @@ void initialiseSystem(){
     Wire.begin();
     Wire.setClock(I2C_FREQUENCY_HZ);
 
-    Wire1.setSDA(I2C1_SDA_PIN);
-    Wire1.setSCL(I2C1_SCL_PIN);
-    Wire1.begin();
-    Wire1.setClock(I2C_FREQUENCY_HZ);
+    //Wire1.setSDA(I2C1_SDA_PIN);
+    //Wire1.setSCL(I2C1_SCL_PIN);
+    //Wire1.begin();
+    //Wire1.setClock(I2C_FREQUENCY_HZ);
 
 
     //init display
@@ -139,13 +233,13 @@ void initialiseSystem(){
     //init buttons
     DEBUG_PRINTLN(F("[INIT] Initializing Buttons..."));
     buttons.begin();
-    buttons.setCallback(buttonCallback);
+    //buttons.setCallback(buttonCallback);
 
 
     //init sensors
     DEBUG_PRINTLN(F("[INIT] Initializing Sensors..."));
     display.showStatusScreen(STATE_INIT, lastError);
-    if(!sensors.begin(&Wire, &Wire1)){
+    if(!sensors.begin(&Wire, &Wire)){
         handleError(sensors.getLastError());
         
         if(!sensors.isReady()){
@@ -210,6 +304,7 @@ void handleStateMachine(){
                 }
                 else{
                     DEBUG_PRINTLN(F("[STATE] Entering IDLE state."));
+                    display.setMode(DISPLAY_MODE_MENU);
                     enterState(STATE_IDLE);
                 }
             }
@@ -302,7 +397,23 @@ void enterState(system_state_t newState){
     switch(newState){
         case STATE_WARMUP:
             warmupStartTime = millis();
-            display.showStatusScreen(STATE_WARMUP, lastError);
+            {
+                display_mode_t mode = display.getMode();
+                if(mode == DISPLAY_MODE_SPLASH || mode == DISPLAY_MODE_MENU || mode == DISPLAY_MODE_CALIBRATION){
+                    display.setMode(DISPLAY_MODE_MENU);
+                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+                }
+            }
+            break;
+
+        case STATE_IDLE:
+            {
+                display_mode_t mode = display.getMode();
+                if(mode == DISPLAY_MODE_SPLASH || mode == DISPLAY_MODE_MENU || mode == DISPLAY_MODE_CALIBRATION){
+                    display.setMode(DISPLAY_MODE_MENU);
+                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+                }
+            }
             break;
 
         case STATE_CALIBRATING:
@@ -387,7 +498,97 @@ void performInference(){
 //button handling
 //===========================================================================================================
 void handleButtons(){
-    //literally does nothing but required to compile :///
+    if(buttons.getLastEvent(BUTTON_DOWN) != BUTTON_EVENT_NONE || buttons.getLastEvent(BUTTON_SELECT) != BUTTON_EVENT_NONE){
+        display.resetTimeout();
+    }
+
+    //menu nav
+    if(display.getMode() == DISPLAY_MODE_MENU){
+        if(buttons.wasPressed(BUTTON_DOWN)){
+            display.menuDown();
+            display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+            updateDisplay();
+        }
+
+        if(buttons.wasLongPressed(BUTTON_DOWN)){
+            display.menuUp();
+            display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+            updateDisplay();
+        }
+        
+
+        if(buttons.wasPressed(BUTTON_SELECT)){
+            display.menuSelect();
+            updateDisplay();
+        }
+        return;
+    }
+
+    //settings menu
+    if(display.getMode() == DISPLAY_MODE_SETTINGS){
+        if(buttons.wasPressed(BUTTON_DOWN)){
+            display.menuDown();
+            display.showMenu(settings_menu_items, SETTINGS_MENU_COUNT, display.getSelectedMenuIndex(), "Settings");
+            updateDisplay();
+        }
+
+        if(buttons.wasLongPressed(BUTTON_DOWN)){
+            display.menuUp();
+            display.showMenu(settings_menu_items, SETTINGS_MENU_COUNT, display.getSelectedMenuIndex(), "Settings");
+            updateDisplay();
+        }
+
+        if(buttons.wasPressed(BUTTON_SELECT)){
+            display.menuSelect();
+            updateDisplay();
+        }
+
+        if(buttons.wasLongPressed(BUTTON_SELECT)){
+            display.setMode(DISPLAY_MODE_MENU);
+            display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+            updateDisplay();
+        }
+        return;
+    }
+
+    //data collection menu
+    if(display.getMode() == DISPLAY_MODE_DATA_COLLECTION){
+        if(buttons.wasPressed(BUTTON_DOWN)){
+            display.menuDown();
+            display.showMenu(collect_menu_items, COLLECT_MENU_COUNT, display.getSelectedMenuIndex(), "Data Collect");
+            updateDisplay();
+        }
+
+        if(buttons.wasLongPressed(BUTTON_DOWN)){
+            display.menuUp();
+            display.showMenu(collect_menu_items, COLLECT_MENU_COUNT, display.getSelectedMenuIndex(), "Data Collect");
+            updateDisplay();
+        }
+
+        if(buttons.wasPressed(BUTTON_SELECT)){
+            display.menuSelect();
+            updateDisplay();
+        }
+
+        if(buttons.wasLongPressed(BUTTON_SELECT)){
+            display.setMode(DISPLAY_MODE_MENU);
+            display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+            updateDisplay();
+        }
+        return;
+    }
+
+    //outside menus: only allow long-press select to return to menu per controls
+    if(buttons.wasPressed(BUTTON_DOWN)){
+        return;
+    }
+
+    if(buttons.wasPressed(BUTTON_SELECT) || buttons.wasLongPressed(BUTTON_SELECT)){
+        display.setMode(DISPLAY_MODE_MENU);
+        display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+        updateDisplay();
+        return;
+    }
 }
 
 void buttonCallback(button_id_t button, button_event_t event){
@@ -398,29 +599,31 @@ void buttonCallback(button_id_t button, button_event_t event){
     DEBUG_PRINTF("[BUTTON] Button %d Event %d\n", button, event);
 
     //handle menu nav
-    if(display.getMode() == DISPLAY_MODE_MENU){
-        switch(button){
-            case BUTTON_UP:
-                if(event == BUTTON_EVENT_SHORT_PRESS){
-                    display.menuUp();
-                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
-                }
-                break;
+    if(display.getMode() == DISPLAY_MODE_MENU || display.getMode() == DISPLAY_MODE_SETTINGS){
+        const menu_item_t* activeItems = (display.getMode() == DISPLAY_MODE_MENU) ? main_menu_items : settings_menu_items;
+        const uint8_t activeCount = (display.getMode() == DISPLAY_MODE_MENU) ? MAIN_MENU_COUNT : SETTINGS_MENU_COUNT;
 
+        switch(button){
             case BUTTON_DOWN:
                 if(event == BUTTON_EVENT_SHORT_PRESS){
                     display.menuDown();
-                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+                    display.showMenu(activeItems, activeCount, display.getSelectedMenuIndex(), display.getMode() == DISPLAY_MODE_MENU ? "Menu" : "Settings");
+                } 
+                else if(event == BUTTON_EVENT_LONG_PRESS){
+                    display.menuUp();
+                    display.showMenu(activeItems, activeCount, display.getSelectedMenuIndex(), display.getMode() == DISPLAY_MODE_MENU ? "Menu" : "Settings");
                 }
                 break;
 
             case BUTTON_SELECT:
                 if(event == BUTTON_EVENT_SHORT_PRESS){
                     display.menuSelect();
+                    updateDisplay();
                 }
                 else if(event == BUTTON_EVENT_LONG_PRESS){
-                    //exit
-                    display.setMode(DISPLAY_MODE_STATUS);
+                    display.setMode(DISPLAY_MODE_MENU);
+                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+                    updateDisplay();
                 }
                 break;
             
@@ -430,39 +633,11 @@ void buttonCallback(button_id_t button, button_event_t event){
         return;
     }
 
-    //normal button handling
-    switch(button){
-        case BUTTON_UP:
-            if(event == BUTTON_EVENT_SHORT_PRESS){
-                display.prevMode();
-            }
-            break;
-        
-        case BUTTON_DOWN:
-            if(event == BUTTON_EVENT_SHORT_PRESS){
-                display.nextMode();
-            }
-            break;
-
-        case BUTTON_SELECT:
-            if(event == BUTTON_EVENT_SHORT_PRESS){
-                //toggle log
-                if(currentState != STATE_LOGGING){
-                    enterState(STATE_LOGGING);
-                }
-                else{
-                    enterState(STATE_IDLE);
-                }
-            }
-            else if(event == BUTTON_EVENT_LONG_PRESS){
-                //open menu
-                display.setMode(DISPLAY_MODE_MENU);
-                display.showMenu(main_menu_items, MAIN_MENU_COUNT, 0);
-            }
-            break;
-
-        default:
-            break;
+    //outside menus, only long-select returns to menu
+    if(button == BUTTON_SELECT && event == BUTTON_EVENT_LONG_PRESS){
+        display.setMode(DISPLAY_MODE_MENU);
+        display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+        updateDisplay();
     }
 }
 
@@ -551,22 +726,61 @@ void updateDisplay(){
             display.showLoggingScreen(logger.getTotalLoggedEntries(), logger.isLogging());
             break;
 
+        case DISPLAY_MODE_DATA_COLLECTION:
+            display.showMenu(collect_menu_items, COLLECT_MENU_COUNT, display.getSelectedMenuIndex(), "Data Collect");
+            break;
+
         case DISPLAY_MODE_SETTINGS:
-            display.showSettingsScreen();
+            display.showMenu(settings_menu_items, SETTINGS_MENU_COUNT, display.getSelectedMenuIndex(), "Settings");
             break;
 
         case DISPLAY_MODE_ERROR:
             display.ShowErrorScreen(lastError);
             break;
 
+        case DISPLAY_MODE_MENU:
+            display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+            break;
+
         default:
             display.showStatusScreen(currentState, lastError);
             break;
     }
+    display.refresh();
+}
+
+void menuActionShowStatus(){
+    display.setMode(DISPLAY_MODE_STATUS);
+}
+
+void menuActionShowSensorData(){
+    display.setMode(DISPLAY_MODE_SENSOR_DATA);
+}
+
+void menuActionShowPrediction(){
+    display.setMode(DISPLAY_MODE_PREDICTION);
+}
+
+void menuActionShowGraph(){
+    display.setMode(DISPLAY_MODE_GRAPH);
+}
+
+void menuActionShowError(){
+    display.setMode(DISPLAY_MODE_ERROR);
+}
+
+void menuActionDataCollection(){
+    display.setMode(DISPLAY_MODE_DATA_COLLECTION);
+    refreshDataCollectionMenu();
 }
 
 void menuActionCalibrate(){
-    if(currentState != STATE_IDLE || currentState != STATE_WARMUP){
+    //stop logging if active, then enter calibration from any non-error state
+    if(currentState == STATE_LOGGING){
+        enterState(STATE_IDLE);
+    }
+
+    if(currentState != STATE_ERROR){
         enterState(STATE_CALIBRATING);
         display.setMode(DISPLAY_MODE_CALIBRATION);
     }
@@ -584,10 +798,144 @@ void menuActionToggleLogging(){
 
 void menuActionSettings(){
     display.setMode(DISPLAY_MODE_SETTINGS);
+    refreshSettingsMenu();
 }
 
-void menuActionBack(){
-    display.setMode(DISPLAY_MODE_STATUS);
+//===========================================================================================================
+//settings menu actions
+//===========================================================================================================
+
+void refreshSettingsMenu(){
+    display.showMenu(settings_menu_items, SETTINGS_MENU_COUNT, display.getSelectedMenuIndex(), "Settings");
+}
+
+void applyHeaterProfile(uint8_t index){
+    switch(index % HEATER_PROFILE_COUNT){
+        case 0:
+            sensors.setDefaultHeaterProfile();
+            break;
+        case 1:
+            sensors.setVOCHeaterProfile();
+            break;
+        case 2:
+            sensors.setFoodHeaterProfile();
+            break;
+        default:
+            sensors.setDefaultHeaterProfile();
+            break;
+    }
+    DEBUG_PRINTF("[Settings] Heater profile set to %s\n", HEATER_PROFILE_NAMES[index % HEATER_PROFILE_COUNT]);
+}
+
+void settingsActionCalibrate(){
+    menuActionCalibrate();
+}
+
+void settingsActionCycleHeaterProfile(){
+    currentHeaterProfileIndex = (currentHeaterProfileIndex + 1) % HEATER_PROFILE_COUNT;
+    applyHeaterProfile(currentHeaterProfileIndex);
+    snprintf(settingsLabelHeater, sizeof(settingsLabelHeater), "Heater: %s", HEATER_PROFILE_NAMES[currentHeaterProfileIndex]);
+    refreshSettingsMenu();
+}
+
+void settingsActionCycleThresholdProfile(){
+    currentThresholdProfileIndex = (currentThresholdProfileIndex + 1) % THRESHOLD_PROFILE_COUNT;
+    const threshold_profile_t &profile = THRESHOLD_PROFILES[currentThresholdProfileIndex];
+    ml.setConfidenceThreshold(profile.confidence);
+    ml.setAnomalyThreshold(profile.anomaly);
+    snprintf(settingsLabelThreshold, sizeof(settingsLabelThreshold), "ML Thr: %s", profile.name);
+    DEBUG_PRINTF("[Settings] ML thresholds set to %s (conf=%.2f, anom=%.2f)\n", profile.name, profile.confidence, profile.anomaly);
+    refreshSettingsMenu();
+}
+
+void settingsActionToggleDisplayProfile(){
+    currentDisplayProfileIndex = (currentDisplayProfileIndex + 1) % DISPLAY_PROFILE_COUNT;
+    const display_profile_t &profile = DISPLAY_PROFILES[currentDisplayProfileIndex];
+    display.setBrightness(profile.brightness);
+    display.setInverted(profile.inverted);
+    snprintf(settingsLabelDisplay, sizeof(settingsLabelDisplay), "Display: %s", profile.name);
+    DEBUG_PRINTF("[Settings] Display profile set to %s (brightness=%u, inverted=%d)\n", profile.name, profile.brightness, profile.inverted);
+    refreshSettingsMenu();
+}
+
+void settingsActionExportData(){
+    String target = logger.getCurrentFilename();
+
+    if(target.length() == 0){
+        String files[1];
+        uint8_t count = 0;
+        if(logger.listLogFiles(files, 1, count) && count > 0){
+            target = files[0];
+        }
+    }
+
+    if(target.length() == 0){
+        DEBUG_PRINTLN(F("[Settings] No log file to export."));
+        return;
+    }
+
+    if(logger.exportToSerial(target.c_str())){
+        DEBUG_PRINTF("[Settings] Exported log %s to serial.\n", target.c_str());
+    } 
+    else {
+        DEBUG_PRINTF("[Settings] Failed to export log %s.\n", target.c_str());
+    }
+}
+
+void settingsActionBackToMain(){
+    display.setMode(DISPLAY_MODE_MENU);
+    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+}
+
+//===========================================================================================================
+//data collection actions
+//===========================================================================================================
+
+void refreshDataCollectionMenu(){
+    if(currentLabelSelection < SCENT_CLASS_TYPE_1 || currentLabelSelection >= SCENT_CLASS_COUNT){
+        currentLabelSelection = SCENT_CLASS_TYPE_1;
+    }
+
+    const char* labelName = (currentLabelSelection >=0 && currentLabelSelection < SCENT_CLASS_COUNT) ? SCENT_CLASS_NAMES[currentLabelSelection] : "Unknown";
+    snprintf(collectLabelSelect, sizeof(collectLabelSelect), "Label: %s", labelName);
+    snprintf(collectLabelToggle, sizeof(collectLabelToggle), collectingLabeled ? "Stop Collect" : "Start Collect");
+    display.showMenu(collect_menu_items, COLLECT_MENU_COUNT, display.getSelectedMenuIndex(), "Data Collect");
+}
+
+void dataCollectActionCycleLabel(){
+    currentLabelSelection++;
+    if(currentLabelSelection >= SCENT_CLASS_COUNT || currentLabelSelection == SCENT_CLASS_UNKNOWN){
+        currentLabelSelection = SCENT_CLASS_TYPE_1;
+    }
+    refreshDataCollectionMenu();
+}
+
+void dataCollectActionToggle(){
+    if(collectingLabeled){
+        logger.setActiveLabel(-1);
+        if(logger.isLogging()){
+            logger.stopLogging();
+        }
+        loggingActive = false;
+        collectingLabeled = false;
+    } 
+    else {
+        if(currentLabelSelection < SCENT_CLASS_TYPE_1 || currentLabelSelection >= SCENT_CLASS_COUNT){
+            currentLabelSelection = SCENT_CLASS_TYPE_1;
+        }
+        logger.setActiveLabel(currentLabelSelection);
+        if(!logger.isLogging()){
+            logger.startLogging();
+        }
+        loggingActive = true;
+        collectingLabeled = true;
+    }
+    refreshDataCollectionMenu();
+}
+
+void dataCollectActionBack(){
+    display.setMode(DISPLAY_MODE_MENU);
+    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
 }
 
 //===========================================================================================================

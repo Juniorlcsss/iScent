@@ -74,11 +74,13 @@ public:
     //===========================================================================================================
     //menu nav
     //===========================================================================================================
-    void showMenu(const menu_item_t *items, uint8_t itemCount, uint8_t selected);
+    void showMenu(const menu_item_t *items, uint8_t itemCount, uint8_t selected, const char* title = "Menu");
     void menuUp();
     void menuDown();
     void menuSelect();
     uint8_t getSelectedMenuIndex() const;
+
+    static const uint8_t MENU_VISIBLE_COUNT =4;
 
     //===========================================================================================================
     //cfg
@@ -123,6 +125,7 @@ private:
     void drawHeader(const char* title);
     void drawFooter(const char* left, const char* right);
     void updateGraphBuffer(float val);
+    void formatGasValue(float ohms, float &val, const char* &unit) const;
 };
 
 #endif

@@ -71,6 +71,7 @@ void DisplayHandler::setMode(display_mode_t mode){
         resetTimeout();
         update();
     }
+    update();
 }
 
 display_mode_t DisplayHandler::getMode() const {
@@ -211,23 +212,49 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
     drawHeader("Sensor Data");
 
     if(!data.primary.complete) return;
-    //primary data
-    _dsp->setCursor(0, 16);
-    _dsp->print("Primary: ");
-    _dsp->printf("T:%.1fC, H:%.1f%%\n", data.primary.temperatures[0], data.primary.humidities[0]);
-    _dsp->printf("P:%.1fPa, G:%.1fOhm\n", data.primary.pressures[0], data.primary.gas_resistances[0]);
 
-    //secondary data
-    if(data.secondary.complete){
-        _dsp->setCursor(0, 40);
-        _dsp->print("Secondary: ");
-        _dsp->printf("T:%.1fC, H:%.1f%%\n", data.secondary.temperatures[0], data.secondary.humidities[0]);
-        _dsp->printf("P:%.1fPa, G:%.1fOhm\n", data.secondary.pressures[0], data.secondary.gas_resistances[0]);
+    float pgVal=0, sgVal=0, dgVal=0; const char* pgUnit=""; const char* sgUnit=""; const char* dgUnit="";
+    formatGasValue(data.primary.gas_resistances[0], pgVal, pgUnit);
+    formatGasValue(data.secondary.gas_resistances[0], sgVal, sgUnit);
+    formatGasValue(data.delta_gas_avg, dgVal, dgUnit);
+    // keep delta gas within ~3 sig figs (value <10) while retaining 2 decimals
+    if(fabsf(dgVal) >= 10.0f){
+        if(strcmp(dgUnit, "Ohm") == 0){
+            dgVal /= 1000.0f;
+            dgUnit = "kOhm";
+        }
+        else if(strcmp(dgUnit, "kOhm") == 0){
+            dgVal /= 1000.0f;
+            dgUnit = "MOhm";
+        }
     }
 
-    //deltas
-    _dsp->setCursor(0, 64);
-    _dsp->printf("dT:%.1f dG:%.0f", data.delta_temp, data.delta_gas_avg);
+    float pPressHpa = data.primary.pressures[0] / 100.0f;
+    float sPressHpa = data.secondary.pressures[0] / 100.0f;
+
+    int16_t y = 12;
+    _dsp->setCursor(0, y);
+    _dsp->printf("Pri T:%.1fC H:%.1f%%", data.primary.temperatures[0], data.primary.humidities[0]);
+    y += 10;
+    _dsp->setCursor(0, y);
+    _dsp->printf("P:%.0fhPa G:%.2f%s", pPressHpa, pgVal, pgUnit);
+
+    if(data.secondary.complete){
+        y += 10;
+        _dsp->setCursor(0, y);
+        _dsp->printf("Sec T:%.1fC H:%.1f%%", data.secondary.temperatures[0], data.secondary.humidities[0]);
+        y += 10;
+        _dsp->setCursor(0, y);
+        _dsp->printf("P:%.0fhPa G:%.2f%s", sPressHpa, sgVal, sgUnit);
+    }
+
+    y += 10;
+    _dsp->setCursor(0, y);
+    _dsp->printf("dT:%.1f dG:%.2f%s", data.delta_temp, dgVal, dgUnit);
+
+
+
+
 }
 
 void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dual_sensor_data_t &data){
@@ -265,13 +292,16 @@ void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dua
 
         //display current gas sensor readings
         _dsp->setCursor(0,48);
-        _dsp->printf("Gas: %.1fOhm", data.primary.gas_resistances[0]);
+        float gVal=0; const char* gUnit="";
+        formatGasValue(data.primary.gas_resistances[0], gVal, gUnit);
+        _dsp->printf("Gas: %.2f%s", gVal, gUnit);
     }
 
     //mini sensor bar graph
     drawBarGraph(102, 14, 24, 48, data.primary.gas_resistances, BME688_NUM_HEATER_STEPS, 500000.0f);
 
     refresh();
+
 }
 
 void DisplayHandler::showGraphScreen(const float* data, uint16_t count, const char* title){
@@ -281,51 +311,94 @@ void DisplayHandler::showGraphScreen(const float* data, uint16_t count, const ch
     drawHeader(title);
 
     //bounds check
-    if(count ==0) return;
+    if(count == 0 || data == nullptr) return;
     if(count > GRAPH_BUFFER_SIZE) count = GRAPH_BUFFER_SIZE;
-    if(data==nullptr) return;
 
-    //find min and max
-    float minVal = data[0], maxVal = data[0];
-    for(uint16_t i=1; i<count; i++){
-        if(data[i] < minVal) minVal = data[i];
-        if(data[i] > maxVal) maxVal = data[i];
+
+    //find min and max, ignoring zeros
+    bool found = false;
+    float minVal = 0, maxVal = 0;
+    for(uint16_t i=0; i<count; i++){
+        float v = data[i];
+        if(v <= 0) continue;
+        if(!found){
+            minVal = maxVal = v;
+            found = true;
+        } 
+        else {
+            if(v < minVal) minVal = v;
+            if(v > maxVal) maxVal = v;
+        }
     }
 
-    //scale graph
-    int16_t graphX = scaleX(0.15f);
-    int16_t graphY= scaleY(0.22f);
-    int16_t graphW = scaleWidth(0.85f);
-    int16_t graphH = scaleHeight(0.70f);
+    if(!found){
+        _dsp->setCursor(0, 20);
+        _dsp->print("No gas data");
+        refresh();
+        return;
+    }
+
+    // format labels compactly for small space
+    float minDisp=0, maxDisp=0; 
+    const char* minUnit=""; 
+    const char* maxUnit="";
+    formatGasValue(minVal, minDisp, minUnit);
+    formatGasValue(maxVal, maxDisp, maxUnit);
+
+    //scale graph (leave space for readable labels)
+    int16_t graphX = 10;
+    int16_t graphY= 14;
+    int16_t graphW = DISPLAY_WIDTH - 20;
+    int16_t graphH = 34;
 
     //draw border
     _dsp->drawRect(graphX-1, graphY-1, graphW+2, graphH+2, SSD1306_WHITE);
-    //draw data
+
     float range = maxVal - minVal;
     if(range < 1.0f){
         range = 1.0f;
     }
 
-    float pixelPerPoint = (float)graphW / count;
-    for(uint16_t i=0; i<count; i++){
-        uint16_t x1 = graphX+ (int16_t)(i * pixelPerPoint - pixelPerPoint);
-        uint16_t x2 = graphX+ (int16_t)(i*pixelPerPoint);
-        uint16_t y1= graphY + graphH - (int16_t)((data[i-1]-minVal) / range * graphH);
-        uint16_t y2= graphY + graphH - (int16_t)((data[i]-minVal) / range * graphH);
-        
-        //bounds
+    float pixelPerPoint = (count > 1) ? (float)(graphW -1) / (count -1) : 0;
+    for(uint16_t i=1; i<count; i++){
+        float prev = data[i-1];
+        float curr = data[i];
+        if(prev <= 0 || curr <= 0) continue;
+
+        uint16_t x1 = graphX + (uint16_t)((i-1) * pixelPerPoint);
+        uint16_t x2 = graphX + (uint16_t)(i * pixelPerPoint);
+        uint16_t y1= graphY + graphH - (uint16_t)(((prev - minVal) / range) * graphH);
+        uint16_t y2= graphY + graphH - (uint16_t)(((curr - minVal) / range) * graphH);
+
         if(x2 < DISPLAY_WIDTH){
             _dsp->drawLine(x1, y1, x2, y2, SSD1306_WHITE);
         }
-
     }
 
     //y labels
-    _dsp->setTextSize(1);
-    _dsp->setCursor(0, graphY);
-    _dsp->printf("%.1f", maxVal);
-    _dsp->setCursor(0, graphY + graphH -6);
-    _dsp->printf("%.1f", minVal);
+    char maxBuf[16];
+    char minBuf[16];
+    snprintf(maxBuf, sizeof(maxBuf), "%.2f%s", maxDisp, maxUnit);
+    snprintf(minBuf, sizeof(minBuf), "%.2f%s", minDisp, minUnit);
+
+    int16_t x1,y1; 
+    uint16_t w,h;
+
+    _dsp->getTextBounds(maxBuf, 0,0, &x1,&y1,&w,&h);
+    int16_t maxY = graphY - 2;
+    if(maxY < 12) {
+        maxY = 12;
+    }
+    _dsp->setCursor(graphX + graphW - w, maxY);
+    _dsp->print(maxBuf);
+
+    _dsp->getTextBounds(minBuf, 0,0, &x1,&y1,&w,&h);
+    int16_t minY = graphY + graphH + 2;
+    if(minY > DISPLAY_HEIGHT - 8) {
+        minY = DISPLAY_HEIGHT - 8;
+    }
+    _dsp->setCursor(graphX + graphW - w, minY);
+    _dsp->print(minBuf);
     refresh();
 }
 
@@ -334,12 +407,12 @@ void DisplayHandler::showCalibrationScreen(float progress, const char* msg){
     clear();
     drawHeader("Calibration");
 
-    _dsp->setCursor(0,16);
+    _dsp->setCursor(0,12);
     _dsp->printf(msg);
 
-    drawProgressBar(10,35,DISPLAY_WIDTH -20, 12, progress, nullptr);
+    drawProgressBar(10,28,DISPLAY_WIDTH -20, 12, progress, nullptr);
 
-    _dsp->setCursor(0, 60);
+    _dsp->setCursor(0, 52);
     _dsp->printf("Progress: %.1f%%", progress *100.0f);
     refresh();
 }
@@ -382,7 +455,7 @@ void DisplayHandler::ShowErrorScreen(error_code_t error){
 
     clear();
     drawHeader("Error");
-    _dsp->setTextSize(2);
+    _dsp->setTextSize(1);
     printCentered("Error!", 20);
     _dsp->println(ERROR_CODE_NAMES[error]);
     _dsp->setCursor(0, 50);
@@ -595,6 +668,23 @@ void DisplayHandler::drawSignalIcon(int16_t x, int16_t y, int8_t rssi){
     }
 }
 
+void DisplayHandler::formatGasValue(float ohms, float &value, const char* &unit) const{
+    const float mag = fabsf(ohms);
+
+    if(mag >= 1000000.0f){
+        value = ohms / 1000000.0f;
+        unit = "MOhm";
+    } 
+    else if(mag >= 1000.0f){
+        value = ohms / 1000.0f;
+        unit = "kOhm";
+    } 
+    else{
+        value = ohms;
+        unit = "Ohm";
+    }
+}
+
 int16_t DisplayHandler::scaleX(float percentage) const{
     return (int16_t)(percentage * DISPLAY_WIDTH);
 }
@@ -616,7 +706,7 @@ int16_t DisplayHandler::scaleHeight(float percentage) const{
 //menu nav
 //===========================================================================================================
 
-void DisplayHandler::showMenu(const menu_item_t *items, uint8_t itemCount, uint8_t selected){
+void DisplayHandler::showMenu(const menu_item_t *items, uint8_t itemCount, uint8_t selected, const char* title){
     if(!_ready || itemCount == 0) return;
     if(selected >= itemCount) selected = 0;
 
@@ -625,19 +715,39 @@ void DisplayHandler::showMenu(const menu_item_t *items, uint8_t itemCount, uint8
     _menuItems = items;
 
     clear();
-    drawHeader("Menu");
+    if(title == nullptr){
+        title = "Menu";
+    }
+    drawHeader(title);
+
+    //window so only MENU_VISIBLE_COUNT items show, keeping selection in view
+    uint8_t windowStart = 0;
+    if(selected >= MENU_VISIBLE_COUNT){
+        windowStart = selected - MENU_VISIBLE_COUNT + 1;
+    }
+    uint8_t windowEnd = min<uint8_t>(windowStart + MENU_VISIBLE_COUNT, itemCount);
 
     int16_t y=12;
-    for(uint8_t i=0; i<itemCount && i<5; i++){
+    for(uint8_t i=windowStart; i<windowEnd; i++){
         if(i==selected){
             _dsp->setCursor(0, y);
             _dsp->print("> ");
         }
         _dsp->setCursor(8, y);
         _dsp->print(items[i].label);
-        y += 10;
+        y += 10; //restore tighter spacing while keeping 4-line window
     }
-    drawFooter("Up/Down: Nav", "Select: OK");
+
+    //scroll indicators so users know there are more items
+    if(windowStart > 0){
+        _dsp->setCursor(DISPLAY_WIDTH - 8, 12);
+        _dsp->print("^");
+    }
+    if(windowEnd < itemCount){
+        _dsp->setCursor(DISPLAY_WIDTH - 8, 52);
+        _dsp->print("v");
+    }
+    drawFooter("Down", "Select");
     refresh();
 }
 
@@ -713,4 +823,3 @@ void DisplayHandler::resetTimeout(){
 bool DisplayHandler::isTimedOut() const {
     return _timedOut;
 }
-

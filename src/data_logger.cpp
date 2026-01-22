@@ -12,7 +12,8 @@ DataLogger::DataLogger():
     _file_index(0),
     _last_flush_time(0),
     _auto_flush_interval(DATA_LOG_FLUSH_INTERVAL_MS),
-    _max_file_size(DATA_LOG_MAX_FILE_SIZE)
+    _max_file_size(DATA_LOG_MAX_FILE_SIZE),
+    _active_label(-1)
 {}
 
 DataLogger::~DataLogger() {
@@ -131,6 +132,7 @@ bool DataLogger::logEntry(const dual_sensor_data_t &data, const ml_prediction_t 
 
     //iaq
     entry.iaq_index = calculateIAQIndex(data.primary.gas_resistances[0], data.primary.humidities[0]);
+    entry.label = _active_label;
 
     //add to buffer
     _buffer[_buffer_head] = entry;
@@ -270,7 +272,7 @@ bool DataLogger::writeHeader(){
     }
 
     //csv header
-    _log_file.println(F("timestamp,temp1,hum1,pres1,gas1_0,gas1_1,gas1_2,gas1_3,gas1_4,"
+    _log_file.println(F("timestamp,label,temp1,hum1,pres1,gas1_0,gas1_1,gas1_2,gas1_3,gas1_4,"\
                         "gas1_5,gas1_6,gas1_7,gas1_8,gas1_9,"
                         "temp2,hum2,pres2,gas2_0,gas2_1,gas2_2,gas2_3,gas2_4,"
                         "gas2_5,gas2_6,gas2_7,gas2_8,gas2_9,"
@@ -285,7 +287,14 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     }
 
     //timestamp
-    _log_file.printf("%lu",entry.timestamp);
+    _log_file.printf("%lu,",entry.timestamp);
+
+    //label
+    if(entry.label >= 0 && entry.label < SCENT_CLASS_COUNT){
+        _log_file.printf("%s,", SCENT_CLASS_NAMES[entry.label]);
+    }else{
+        _log_file.print("None,");
+    }
 
     //sensor data
     _log_file.printf("%.2f,%.2f,%.2f,",
@@ -327,6 +336,14 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
 
     _file_entry_count++;
     return true;
+}
+
+void DataLogger::setActiveLabel(int16_t label){
+    _active_label = label;
+}
+
+int16_t DataLogger::getActiveLabel() const{
+    return _active_label;
 }
 
 bool DataLogger::writeBufferToFile(){

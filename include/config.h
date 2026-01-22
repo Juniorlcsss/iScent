@@ -39,8 +39,8 @@
 #define DISPLAY_RESET_PIN -1
 
 //interaction buttons
-#define BUTTON_SELECT_PIN 9 //GP6
-#define BUTTON_DOWN_PIN 10 //GP7
+#define BUTTON_SELECT_PIN 7 //GP7   black
+#define BUTTON_DOWN_PIN 6 //GP6     red
 #define BUTTON_DEBOUNCE_MS 50
 #define BUTTON_LONG_PRESS_MS 2000
 
@@ -160,7 +160,8 @@ typedef enum{
     DISPLAY_MODE_COUNT,
     DISPLAY_MODE_MENU,
     DISPLAY_MODE_ERROR,
-    DISPLAY_MODE_CALIBRATION
+    DISPLAY_MODE_CALIBRATION,
+    DISPLAY_MODE_DATA_COLLECTION
 }display_mode_t;
 
 

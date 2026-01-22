@@ -22,8 +22,8 @@ ButtonHandler::~ButtonHandler(){
 bool ButtonHandler::begin(){
     DEBUG_PRINTLN(F("[ButtonHandler] Initializing button handler"));
 
-    addButton(BUTTON_SELECT, BUTTON_SELECT_PIN);
-    addButton(BUTTON_DOWN, BUTTON_DOWN_PIN);
+    addButton(BUTTON_SELECT, BUTTON_SELECT_PIN, false);
+    addButton(BUTTON_DOWN, BUTTON_DOWN_PIN, false);
 
     _init = true;
     DEBUG_PRINTLN(F("[ButtonHandler] Button handler initialized successfully"));

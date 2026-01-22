@@ -453,7 +453,7 @@ bool BME688Handler::readSingleReading(Bme68x &sensor, sensor_data_t &data){
 }
 
 void BME688Handler::calculateDeltas(dual_sensor_data_t &data){
-    if(!data.primary.complete || data.secondary.complete){
+    if(!data.primary.complete || !data.secondary.complete){
         data.delta_temp = 0;
         data.delta_hum = 0;
         data.delta_pres = 0;
