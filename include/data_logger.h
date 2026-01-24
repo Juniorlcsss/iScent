@@ -2,6 +2,9 @@
 #define DATA_LOGGER_H
 
 #include <Arduino.h>
+#include <FS.h>
+#include <SPI.h>
+#include <SD.h>
 #include "config.h"
 #include <LittleFS.h>
 #include "ml_inference.h"
@@ -75,6 +78,7 @@ public:
 private:
     File _log_file;
     String _current_filename;
+    bool _using_sd;
 
     //===========================================================================================================
     //buffer
@@ -100,6 +104,8 @@ private:
     uint32_t _file_entry_count;
     uint16_t _file_index;
     int16_t _active_label;
+    String normalisePath(const String &path) const;
+    String stripLeadingSlash(const String &path) const;
 
     //===========================================================================================================
     //methods

@@ -13,7 +13,8 @@ DataLogger::DataLogger():
     _last_flush_time(0),
     _auto_flush_interval(DATA_LOG_FLUSH_INTERVAL_MS),
     _max_file_size(DATA_LOG_MAX_FILE_SIZE),
-    _active_label(-1)
+    _active_label(-1),
+    _using_sd(false)
 {}
 
 DataLogger::~DataLogger() {
@@ -32,18 +33,27 @@ DataLogger::~DataLogger() {
 bool DataLogger::begin(){
     DEBUG_PRINTLN(F("[DataLogger] Initialising..."));
 
-    //init
-    if(!LittleFS.begin()){
-        DEBUG_PRINTLN("[DataLogger] Formatting...");
-        if(!LittleFS.format()){
-            DEBUG_PRINTLN(F("[DataLogger] Error: LittleFS format failed"));
-            return false;
-        }
-        if(!LittleFS.begin()){
-            DEBUG_PRINTLN(F("[DataLogger] Error: LittleFS mount failed after format"));
-            return false;
-        }
+    //init sd
+    SPI.setRX(SD_MISO_PIN);
+    SPI.setSCK(SD_SCK_PIN);
+    SPI.setTX(SD_MOSI_PIN);
+    pinMode(SD_CS_PIN, OUTPUT);
+    digitalWrite(SD_CS_PIN, HIGH);
+
+    if(SD.begin(SD_CS_PIN)){
+        _using_sd = true;
+        DEBUG_PRINTLN(F("[DataLogger] SD card initialized."));
     }
+    else{
+        DEBUG_PRINTLN(F("[DataLogger] Warning: SD card initialization failed, falling back to LittleFS."));
+        //init littlefs
+        if(!LittleFS.begin()){
+            DEBUG_PRINTLN("[DataLogger] mount failed");
+        }
+        _using_sd = false;
+        DEBUG_PRINTLN("[DataLogger] LittleFS initialized.");
+    }
+
 
     //allocate buffer
     _buffer = new log_entry_t[_buffer_size];
@@ -55,16 +65,32 @@ bool DataLogger::begin(){
     _init=true;
 
     //find highest existing file id
-    Dir dir = LittleFS.openDir("/");
-
-    while(dir.next()){
-        String name = dir.fileName();
-        if(name.startsWith(DATA_LOG_FILENAME)){
-            int idx = name.substring(strlen(DATA_LOG_FILENAME) + 1, name.indexOf('.')).toInt();
-            if(idx >= _file_index){
-                _file_index = idx + 1;
+    {
+        File dir = _using_sd ? SD.open("/", FILE_READ) : LittleFS.open("/", "r");
+        const char* base = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME +1 : DATA_LOG_FILENAME;
+        while(dir){
+            File entry = dir.openNextFile();
+            if(!entry){
+                break;
             }
+
+            String name = stripLeadingSlash(String(entry.name()));
+            if(name.startsWith(base)){
+                int idx = strlen(base) +1;
+                int dot = name.indexOf('.');
+
+                if(dot > idx){
+                    int idx = name.substring(idx,dot).toInt();
+                    if(idx >= _file_index){
+                        _file_index = idx +1;
+                    }
+                }
+            }
+            entry.close();
+                
         }
+        dir.close();
+        
     }
     DEBUG_PRINTF("[DataLogger] Initialization complete. Next log file index: %d\n", _file_index);
     return true;
@@ -89,7 +115,7 @@ bool DataLogger::startLogging(const char *filename){
         return true;
     }
     if(filename != nullptr){
-        _current_filename = String(filename);
+        _current_filename = normalisePath(String(filename));
     }
     else{
         _current_filename = generateFilename();
@@ -114,7 +140,7 @@ bool DataLogger::isLogging() const{
 }
 
 bool DataLogger::logEntry(const dual_sensor_data_t &data, const ml_prediction_t *pred){
-    if(!_is_logging){
+    if(!_is_logging || !_buffer){
         return false;
     }
 
@@ -195,19 +221,35 @@ bool DataLogger::isBufferFull() const{
 }
 
 size_t getUsedSpace() {
-    FSInfo info;
-    if(LittleFS.info(info)){
-        return info.usedBytes;
-    }
+
     return 0;
 }
 
 size_t getFreeSpace() {
-    FSInfo info;
-    if(LittleFS.info(info)){
-        return info.totalBytes - info.usedBytes;
-    }
+    
     return 0;
+}
+
+
+//===========================================================================================================
+//state
+//===========================================================================================================
+String DataLogger::normalisePath(const String &name) const{
+    if(name.length()==0){
+        return String("/");
+    }
+    if(name.startsWith("/")){
+        return name;
+    }
+    return "/" + name;
+}
+
+String DataLogger::stripLeadingSlash(const String &name) const{
+    if(name.startsWith("/")){
+        return name.substring(1);
+    }
+    return name;
+
 }
 
 //===========================================================================================================
@@ -219,7 +261,14 @@ bool DataLogger::createNewLogFile(){
         closeLogFile();
     }
 
-    _log_file = LittleFS.open(_current_filename, "w");
+    String path = normalisePath(_current_filename);
+    if(_using_sd){
+        _log_file = SD.open(path.c_str(), FILE_WRITE);
+    }
+    else{
+        _log_file = LittleFS.open(path.c_str(), "w");
+    }
+
     if(!_log_file){
         DEBUG_PRINTF("[DataLogger] Error: Failed to create log file %s\n", _current_filename.c_str());
         return false;
@@ -262,7 +311,8 @@ uint32_t DataLogger::getTotalLoggedEntries() const{
 
 String DataLogger::generateFilename(){
     char filename[32];
-    snprintf(filename, sizeof(filename), "%s_%04d.csv",DATA_LOG_FILENAME, _file_index++);
+    const char* baseName = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME + 1 : DATA_LOG_FILENAME;
+    snprintf(filename, sizeof(filename), "/%s_%04d.csv", baseName, _file_index++);
     return String(filename);
 }
 
@@ -388,13 +438,22 @@ bool DataLogger::listLogFiles(String *files, uint8_t max, uint8_t &count){
     }
 
     count=0;
-    Dir dir = LittleFS.openDir("/");
+    File dir = _using_sd ? SD.open("/", FILE_READ) : LittleFS.open("/", "r");
+    const char* base = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME +1 : DATA_LOG_FILENAME;
 
-    while(dir.next() && count < max){
-        String name = dir.fileName();
-        if(name.startsWith(DATA_LOG_FILENAME)){
-            files[count++] = name;
+    while(dir && count < max){
+        File file = dir.openNextFile();
+        if(!file){
+            break;
         }
+        String name = stripLeadingSlash(String(file.name()));
+        if(name.startsWith(base)){
+            files[count++] = normalisePath(name);
+        }
+        file.close();
+    }
+    if(dir){
+        dir.close();
     }
     return true;
 }
@@ -404,17 +463,20 @@ bool DataLogger::deleteLogFile(const char* filename){
         return false;
     }
 
-    if(_is_logging && _current_filename == String(filename)){
+    String path = normalisePath(String(filename));
+
+    if(_is_logging && _current_filename == path){
         DEBUG_PRINTLN(F("[DataLogger] Error: Cannot delete active log file."));
         return false;
     }
 
-    if(LittleFS.remove(filename)){
-        DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", filename);
+    bool removed =  _using_sd ? SD.remove(path.c_str()) : LittleFS.remove(path);
+    if(removed){
+        DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", path.c_str());
         return true;
     }
     else{
-        DEBUG_PRINTF("[DataLogger] Error: Failed to delete log file %s\n", filename);
+        DEBUG_PRINTF("[DataLogger] Error: Failed to delete log file %s\n", path.c_str());
         return false;
     }
 }
@@ -426,14 +488,32 @@ bool DataLogger::deleteAllLogFiles(){
 
     stopLogging();
 
-    Dir dir = LittleFS.openDir("/");
-    while(dir.next()){
-        String name = dir.fileName();
-        if(name.startsWith(DATA_LOG_FILENAME)){
-            LittleFS.remove(name);
+    File dir = _using_sd ? SD.open("/", FILE_READ) : LittleFS.open("/", "r");
+    const char* base = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME +1 : DATA_LOG_FILENAME;
+
+    while(dir){
+        File file = dir.openNextFile();
+        if(!file){
+            break;
+        }
+        String name = stripLeadingSlash(String(file.name()));
+
+        if(name.startsWith(base)){
+            if(_using_sd){
+                SD.remove(normalisePath(name).c_str());
+            }
+            else{
+                LittleFS.remove(normalisePath(name));
+            }
             DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", name.c_str());
         }
+        file.close();
     }
+
+    if(dir){
+        dir.close();
+    }
+    
 
     _file_index =0;
     _total_entries = 0;
@@ -445,14 +525,15 @@ bool DataLogger::exportToSerial(const char* filename){
         return false;
     }
 
-    File file = LittleFS.open(filename, "r");
+    String name = normalisePath(String(filename));
+    File file = _using_sd ? SD.open(name.c_str(), FILE_READ) : LittleFS.open(name.c_str(), "r");
     if(!file){
-        DEBUG_PRINTF("[DataLogger] Error: Failed to open log file %s for export\n", filename);
+        DEBUG_PRINTF("[DataLogger] Error: Failed to open log file %s for export\n", name.c_str());
         return false;
     }
 
     Serial.println(F("Begin log export:"));
-    Serial.println(filename);
+    Serial.println(name);
     while(file.available()){
         Serial.write(file.read());
     }
