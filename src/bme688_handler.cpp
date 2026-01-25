@@ -67,11 +67,9 @@ bool BME688Handler::begin(TwoWire *primary, TwoWire *secondary){
         }
     }
 
-    //set heater profile
-    if(!setDefaultHeaterProfile()){
-        DEBUG_PRINTLN("[BME688] Setting default heater profile failed");
-        return false;
-    }
+    applyHeaterOffProfile();
+    _current_mode = MODE_FORCED;
+    setOperatingMode(MODE_FORCED);
 
     //load
     loadCalibration();
@@ -124,6 +122,20 @@ bool BME688Handler::isSecondaryReady() const {
 //===========================================================================================================
 //CFG
 //===========================================================================================================
+
+void BME688Handler::applyHeaterOffProfile(){
+    uint16_t zeroTemp[1] = {0};
+    uint16_t zeroDur[1] = {0};
+
+    if(_primary_ready){
+        _sensor_primary.setHeaterProf(zeroTemp, zeroDur, 1);
+        _sensor_primary.setOpMode(BME68X_FORCED_MODE);
+    }
+    if(_secondary_ready){
+        _sensor_secondary.setHeaterProf(zeroTemp, zeroDur, 1);
+        _sensor_secondary.setOpMode(BME68X_FORCED_MODE);
+    }
+}
 
 bool BME688Handler::setHeaterProfile(const heater_profile_t &profile){
     memcpy(&_current_profile, &profile, sizeof(heater_profile_t));
@@ -211,13 +223,10 @@ bool BME688Handler::setOperatingMode(bme688_mode_t mode){
             break;
 
         case MODE_PARALLEL:
-            DEBUG_PRINTLN("[BME688] Operating mode set to PARALLEL");
-            if(_primary_ready){
-                success &= configureParallelMode(_sensor_primary);
-            }
-            if(_secondary_ready){
-                success &= configureParallelMode(_sensor_secondary);
-            }
+            DEBUG_PRINTLN("[BME688] Operating mode set to PARALLEL (overridden to FORCED heater-off for ambient)");
+            mode = MODE_FORCED;
+            _current_mode = MODE_FORCED;
+            success &= setOperatingMode(MODE_FORCED);
             break;
         
         case MODE_SEQUENTIAL:
@@ -248,8 +257,11 @@ bool BME688Handler::configureForcedMode(Bme68x &sensor){
 }
 
 bool BME688Handler::configureParallelMode(Bme68x &sensor){
+    uint16_t zeroTemp[1] = {0};
+    uint16_t zeroDur[1] = {0};
+    sensor.setHeaterProf(zeroTemp, zeroDur, 1);
     sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
-    sensor.setOpMode(BME68X_PARALLEL_MODE);
+    sensor.setOpMode(BME68X_FORCED_MODE);
     return !sensor.checkStatus();
 }
 
@@ -334,31 +346,9 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
     data.timestamp = millis();
 
     bool success = false;
-    bool primarySingleSuccess = false;
-    bool secondarySingleSuccess = false;
-
-    //primary
-    if(_primary_ready){
-        if(readSensorScan(_sensor_primary, data.primary)){
-            success = true;
-        } else {
-            DEBUG_PRINTLN("[BME688] Primary sensor read error");
-        }
-    }
-
-    //secondary
-    if(_secondary_ready){
-        if(readSensorScan(_sensor_secondary, data.secondary)){
-            success = true;
-        } else {
-            DEBUG_PRINTLN("[BME688] Secondary sensor read error");
-        }
-    }
-
-    //fallback
     sensor_data_t singleData;
+
     if(_primary_ready && readSingleReading(_sensor_primary, singleData)){
-        primarySingleSuccess = true;
         for(uint8_t i=0; i< BME688_NUM_HEATER_STEPS; i++){
             data.primary.temperatures[i] = singleData.temperature;
             data.primary.humidities[i] = singleData.humidity;
@@ -366,9 +356,10 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
         }
         data.primary.validReadings = max<uint8_t>(data.primary.validReadings, 1);
         data.primary.complete = (data.primary.validReadings > 0);
+        success = true;
     }
+
     if(_secondary_ready && readSingleReading(_sensor_secondary, singleData)){
-        secondarySingleSuccess = true;
         for(uint8_t i=0; i< BME688_NUM_HEATER_STEPS; i++){
             data.secondary.temperatures[i] = singleData.temperature;
             data.secondary.humidities[i] = singleData.humidity;
@@ -376,10 +367,8 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
         }
         data.secondary.validReadings = max<uint8_t>(data.secondary.validReadings, 1);
         data.secondary.complete = (data.secondary.validReadings > 0);
+        success = true;
     }
-
-    //
-    success = success || primarySingleSuccess || secondarySingleSuccess;
 
     if(success){
         calculateDeltas(data);
@@ -525,13 +514,8 @@ bool BME688Handler::readSingleReading(Bme68x &sensor, sensor_data_t &data){
         data.gas_index = bmeData.gas_index;
         data.status = bmeData.status;
         data.valid = true;
-        setHeaterProfile(_current_profile);
-        setOperatingMode(_current_mode);
-
         return true;
     }
-    setHeaterProfile(_current_profile);
-    setOperatingMode(_current_mode);
     _last_error = ERROR_SENSOR_READ;
     return false;
 }

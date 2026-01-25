@@ -99,6 +99,7 @@ public:
 //===========================================================================================================
     //set heater profile
     bool setHeaterProfile(const heater_profile_t &profile);
+    void applyHeaterOffProfile();
 
     //set default optimised heater profile
     bool setDefaultHeaterProfile();
