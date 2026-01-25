@@ -36,6 +36,7 @@ public:
     bool startLogging(const char* filename = nullptr);//
     bool stopLogging();//
     bool isLogging() const;//
+    String toFsPath(const String &path) const;
 
     bool logEntry(const dual_sensor_data_t &data, const ml_prediction_t *pred = nullptr);//
     bool logRawData(const dual_sensor_data_t &data);//
@@ -63,6 +64,10 @@ public:
     bool deleteLogFile(const char *filename);//
     bool deleteAllLogFiles();//
     bool exportToSerial(const char* filename);//
+
+    //utility
+    bool ensureFileExists(const char* filename);
+    bool isUsingSD() const { return _using_sd; }
 
     //labels
     void setActiveLabel(int16_t label);
@@ -111,6 +116,7 @@ private:
     //methods
     //===========================================================================================================
     String generateFilename();
+    String sanitizeLabel(const char* label) const;
     bool writeHeader();
     bool writeEntry(const log_entry_t &entry);
     bool writeBufferToFile();

@@ -238,7 +238,7 @@ static const char* ERROR_CODE_NAMES[] = {
 //===========================================================================================================
 #define MAIN_LOOP_INTERVAL_MS 100
 #define SENSOR_READ_TIMEOUT_MS 2000
-#define CALIBRATION_TIMEOUT_MS 120000
+#define CALIBRATION_TIMEOUT_MS 300000
 #define SENSOR_WARMUP_TIME_MS 30000
 #define SENSOR_STABILIZATION_TIME_MS 60000
 #define BLE_CONNECTION_TIMEOUT_MS 30000

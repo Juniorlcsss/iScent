@@ -70,6 +70,16 @@ typedef struct{
     uint32_t samples;
 } sensor_stats_t;
 
+//tracks an in-flight non-blocking scan
+typedef struct{
+    bool active;
+    bool seen[BME688_NUM_HEATER_STEPS];
+    uint8_t expectedSteps;
+    uint32_t timeoutMs;
+    uint32_t startMs;
+    uint32_t lastProgressMs;
+} scan_context_t;
+
 class BME688Handler {
 public:
     BME688Handler();
@@ -111,6 +121,7 @@ public:
     bool startParallelMode();
     bool readParallelScan(dual_sensor_data_t &data);
     bool performFullScan(dual_sensor_data_t &data);
+    bool isScanActive() const;
 
 
 
@@ -206,6 +217,8 @@ private:
     //config
     sensor_calibration_t _calibration_data;
     heater_profile_t _current_profile;
+    heater_profile_t _saved_profile;
+    bool _has_saved_profile;
     bme688_mode_t _current_mode;
 
     //stats
@@ -248,6 +261,16 @@ private:
     void accumulateCalibrationData(const dual_sensor_data_t &data);
     float getMean(const float *data, uint8_t count);
     float getStdDev(const float *data, uint8_t count, float mean);
+
+    bool beginNonBlockingScan();
+    bool pollScanContext(Bme68x &sensor, sensor_scan_t &scan, scan_context_t &ctx);
+    void resetScanContext(scan_context_t &ctx);
+
+    //tracks pending scan
+    scan_context_t _primary_scan_ctx;
+    scan_context_t _secondary_scan_ctx;
+    bool _scan_active;
+    dual_sensor_data_t _scan_buffer;
 };
 
 //ccalc indoor air quality

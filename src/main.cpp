@@ -34,6 +34,8 @@ bool loggingActive = false;
 bool continuousInference = true;
 bool collectingLabeled = false;
 int16_t currentLabelSelection = SCENT_CLASS_TYPE_1;
+uint32_t lastLoggingRetryMs = 0;
+const uint32_t LOGGING_RETRY_INTERVAL_MS = 3000;
 
 //===========================================================================================================
 //functions
@@ -43,12 +45,14 @@ void handleStateMachine();
 void handleButtons();
 void handleBLE();
 void updateDisplay();
-void performSampling();
+bool performSampling();
 void performInference();
 void enterState(system_state_t newState);
 void handleError(error_code_t error);
 void buttonCallback(button_id_t buttonId, button_event_t event);
 void printStatus();
+void ensureLoggingActive();
+bool isMenuNavigationActive();
 
 //menu actions
 void menuActionShowStatus();
@@ -58,7 +62,6 @@ void menuActionShowGraph();
 void menuActionShowError();
 void menuActionDataCollection();
 void menuActionCalibrate();
-void menuActionToggleLogging();
 void menuActionSettings();
 
 //settings menu actions
@@ -67,6 +70,7 @@ void settingsActionCycleHeaterProfile();
 void settingsActionCycleThresholdProfile();
 void settingsActionToggleDisplayProfile();
 void settingsActionExportData();
+void settingsActionWipeSD();
 void settingsActionBackToMain();
 void refreshSettingsMenu();
 void applyHeaterProfile(uint8_t index);
@@ -85,7 +89,6 @@ menu_item_t main_menu_items[] = {
     {"Gas Graph", menuActionShowGraph, DISPLAY_MODE_GRAPH},
     {"Data Collect", menuActionDataCollection, DISPLAY_MODE_DATA_COLLECTION},
     {"Calibrate", menuActionCalibrate, DISPLAY_MODE_CALIBRATION},
-    {"Toggle Logging", menuActionToggleLogging, DISPLAY_MODE_LOGGING},
     {"Last Error", menuActionShowError, DISPLAY_MODE_ERROR},
     {"Settings", menuActionSettings, DISPLAY_MODE_SETTINGS}
 };
@@ -97,6 +100,7 @@ static char settingsLabelHeater[24] = "Heater: Default";
 static char settingsLabelThreshold[28] = "ML Thr: Default";
 static char settingsLabelDisplay[24] = "Display: Normal";
 static char settingsLabelExport[] = "Export Last Log";
+static char settingsLabelWipe[] = "Wipe SD Card";
 static char settingsLabelBack[] = "Back";
 
 //data collection labels
@@ -146,6 +150,7 @@ menu_item_t settings_menu_items[] = {
     {settingsLabelThreshold, settingsActionCycleThresholdProfile, DISPLAY_MODE_SETTINGS},
     {settingsLabelDisplay, settingsActionToggleDisplayProfile, DISPLAY_MODE_SETTINGS},
     {settingsLabelExport, settingsActionExportData, DISPLAY_MODE_SETTINGS},
+    {settingsLabelWipe, settingsActionWipeSD, DISPLAY_MODE_SETTINGS},
     {settingsLabelBack, settingsActionBackToMain, DISPLAY_MODE_MENU}
 };
 const uint8_t SETTINGS_MENU_COUNT = sizeof(settings_menu_items) / sizeof(menu_item_t);
@@ -175,6 +180,25 @@ void setup(){
     initialiseSystem();
 }
 
+void ensureLoggingActive(){
+    if(loggingActive){
+        return;
+    }
+
+    uint32_t now = millis();
+    if(now - lastLoggingRetryMs < LOGGING_RETRY_INTERVAL_MS){
+        return;
+    }
+    lastLoggingRetryMs = now;
+
+    if(logger.startLogging()){
+        loggingActive = true;
+        DEBUG_PRINTLN(F("[AutoLog] Logging active"));
+    } else {
+        loggingActive = false;
+    }
+}
+
 //===========================================================================================================
 //MAIN LOOP
 //===========================================================================================================
@@ -190,6 +214,9 @@ void loop(){
     //state machine
     handleStateMachine();
 
+    //ensure logging
+    ensureLoggingActive();
+
     //update display regularly
     if(millis() - lastDisplayUpdateTime >= DISPLAY_UPDATE_INTERVAL_MS){
         updateDisplay();
@@ -197,6 +224,11 @@ void loop(){
     }
 
     delay(10);
+}
+
+bool isMenuNavigationActive(){
+    display_mode_t mode = display.getMode();
+    return (mode == DISPLAY_MODE_MENU || mode == DISPLAY_MODE_SETTINGS || mode == DISPLAY_MODE_DATA_COLLECTION);
 }
 
 //===========================================================================================================
@@ -310,16 +342,18 @@ void handleStateMachine(){
             }
             //sample during warmup :)
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
-                sensors.performFullScan(currentSensorData);
-                lastSampleTime = millis();
+                if(performSampling()){
+                    lastSampleTime = millis();
+                }
             }
             break;
 
         case STATE_CALIBRATING:
             //
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
-                performSampling();
-                lastSampleTime = millis();
+                if(performSampling()){
+                    lastSampleTime = millis();
+                }
             }
 
             if(!sensors.isCalibrating()){
@@ -335,22 +369,24 @@ void handleStateMachine(){
             break;
 
         case STATE_SAMPLING:
-            performSampling();
-            lastSampleTime = millis();
+            if(performSampling()){
+                lastSampleTime = millis();
 
-            //move to inference if ready
-            if(continuousInference && ml.isFeatureBufferReady()){
-                enterState(STATE_INFERENCING);
-            }
-            else{
-                enterState(STATE_IDLE);
+                //move to inference if ready
+                if(continuousInference && ml.isFeatureBufferReady()){
+                    enterState(STATE_INFERENCING);
+                }
+                else{
+                    enterState(STATE_IDLE);
+                }
             }
             break;
 
         case STATE_INFERENCING:
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
-                performSampling();
-                lastSampleTime = millis();
+                if(performSampling()){
+                    lastSampleTime = millis();
+                }
             }
             break;
 
@@ -421,8 +457,7 @@ void enterState(system_state_t newState){
             break;
 
         case STATE_LOGGING:
-            logger.startLogging();
-            loggingActive = true;
+            //logging auto
             break;
 
         case STATE_SLEEP:
@@ -446,32 +481,36 @@ void enterState(system_state_t newState){
 //sampling
 //===========================================================================================================
 
-void performSampling(){
-    if(sensors.performFullScan(currentSensorData)){
-        //add window
-        ml.addToWindow(currentSensorData);
+bool performSampling(){
+    bool ready = sensors.performFullScan(currentSensorData);
 
-        //log
-        if(loggingActive){
-            logger.logEntry(currentSensorData, currentPrediction.valid ? &currentPrediction : nullptr);
+    if(!ready){
+        if(sensors.getLastError() != ERROR_NONE){
+            DEBUG_PRINTLN(F("[ERROR] Sensor read failed during sampling!"));
+            lastError = ERROR_SENSOR_READ;
         }
-
-        //send via BLE
-        if(ble.isConnected()){
-            ble.sendSensorData(currentSensorData);
-        }
-
-        DEBUG_VERBOSE_PRINTF("[Sample] T:%.1f H:%.1f G:%.0f\n", 
-            currentSensorData.primary.temperatures,
-            currentSensorData.primary.humidities[0],
-            currentSensorData.primary.gas_resistances[0]
-        );
-    }
-    else{
-        DEBUG_PRINTLN(F("[ERROR] Sensor read failed during sampling!"));
-        lastError = ERROR_SENSOR_READ;
+        return false;
     }
 
+    ml.addToWindow(currentSensorData);
+
+    //log
+    if(loggingActive){
+        logger.logEntry(currentSensorData, currentPrediction.valid ? &currentPrediction : nullptr);
+    }
+
+    //send via BLE
+    if(ble.isConnected()){
+        ble.sendSensorData(currentSensorData);
+    }
+
+    DEBUG_VERBOSE_PRINTF("[Sample] T:%.1f H:%.1f G:%.0f\n", 
+        currentSensorData.primary.temperatures,
+        currentSensorData.primary.humidities[0],
+        currentSensorData.primary.gas_resistances[0]
+    );
+
+    return true;
 }
 
 void performInference(){
@@ -657,12 +696,11 @@ void handleBLE(){
             enterState(STATE_CALIBRATING);
         }
         else if(cfg.startsWith("LOG:ON")){
-            enterState(STATE_LOGGING);
+            loggingActive = false;
         }
         else if(cfg.startsWith("LOG:OFF")){
-            if(currentState == STATE_LOGGING){
-                enterState(STATE_IDLE);
-            }
+            logger.stopLogging();
+            loggingActive = false;
         }
         else if(cfg.startsWith("LABEL:")){
             int l = cfg.substring(6).toInt();
@@ -722,9 +760,6 @@ void updateDisplay(){
             display.showGraphScreen(currentSensorData.primary.gas_resistances, BME688_NUM_HEATER_STEPS, "Gas Resistance");
             break;
 
-        case DISPLAY_MODE_LOGGING:
-            display.showLoggingScreen(logger.getTotalLoggedEntries(), logger.isLogging());
-            break;
 
         case DISPLAY_MODE_DATA_COLLECTION:
             display.showMenu(collect_menu_items, COLLECT_MENU_COUNT, display.getSelectedMenuIndex(), "Data Collect");
@@ -775,25 +810,10 @@ void menuActionDataCollection(){
 }
 
 void menuActionCalibrate(){
-    //stop logging if active, then enter calibration from any non-error state
-    if(currentState == STATE_LOGGING){
-        enterState(STATE_IDLE);
-    }
-
     if(currentState != STATE_ERROR){
         enterState(STATE_CALIBRATING);
         display.setMode(DISPLAY_MODE_CALIBRATION);
     }
-}
-
-void menuActionToggleLogging(){
-    if(currentState == STATE_LOGGING){
-        enterState(STATE_IDLE);
-    }
-    else if(currentState == STATE_IDLE){
-        enterState(STATE_LOGGING);
-    }
-    display.setMode(DISPLAY_MODE_LOGGING);
 }
 
 void menuActionSettings(){
@@ -880,6 +900,15 @@ void settingsActionExportData(){
     else {
         DEBUG_PRINTF("[Settings] Failed to export log %s.\n", target.c_str());
     }
+}
+
+void settingsActionWipeSD(){
+    DEBUG_PRINTLN(F("[Settings] Wiping log files..."));
+    logger.deleteAllLogFiles();
+    loggingActive = false;
+    collectingLabeled = false;
+    logger.setActiveLabel(-1);
+    refreshSettingsMenu();
 }
 
 void settingsActionBackToMain(){

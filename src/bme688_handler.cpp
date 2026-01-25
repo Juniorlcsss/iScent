@@ -2,6 +2,8 @@
 #include <LittleFS.h>
 
 #define CALIBRATION_FILE "/calibration.dat"
+#define SCAN_PROGRESS_GUARD_MS 500U
+#define SCAN_EXTRA_TIMEOUT_MS 200U
 
 BME688Handler::BME688Handler():
     _wire_primary(nullptr),
@@ -14,12 +16,18 @@ BME688Handler::BME688Handler():
     _sample_count(0),
     _calibration_samples(0),
     _calibration_temp_sum_p(0),
-    _last_error(ERROR_NONE)
+    _last_error(ERROR_NONE),
+    _has_saved_profile(false),
+    _scan_active(false)
 {
     memset(&_calibration_data, 0 , sizeof(_calibration_data));
     memset(&_primary_stats, 0, sizeof(_primary_stats));
     memset(&_secondary_stats, 0, sizeof(_secondary_stats));
     memset(&_current_profile, 0, sizeof(_current_profile));
+
+    resetScanContext(_primary_scan_ctx);
+    resetScanContext(_secondary_scan_ctx);
+    memset(&_scan_buffer, 0, sizeof(_scan_buffer));
 
     //init calib
     _calibration_temp_sum_p = _calibration_temp_sum_s = 0.0f;
@@ -235,7 +243,7 @@ bme688_mode_t BME688Handler::getOperatingMode() const {
 
 bool BME688Handler::configureForcedMode(Bme68x &sensor){
     sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
-    sensor.setOpMode(BME68X_PARALLEL_MODE);
+    sensor.setOpMode(BME68X_FORCED_MODE);
     return !sensor.checkStatus();
 }
 
@@ -264,37 +272,47 @@ bool BME688Handler::readParallelScan(dual_sensor_data_t &data){
     memset(&data,0,sizeof(data));
     data.timestamp = millis();
 
-    bool success = false;
+    bool primarySuccess = false;
+    bool secondarySuccess = false;
 
     //primary
     if(_primary_ready){
-        if(readSensorScan(_sensor_primary, data.primary)){
-            success = true;
-        } else {
+        primarySuccess = readSensorScan(_sensor_primary, data.primary);
+        if(!primarySuccess){
             DEBUG_PRINTLN("[BME688] Primary sensor read error");
         }
     }
 
     //secondary
     if(_secondary_ready){
-        if(readSensorScan(_sensor_secondary, data.secondary)){
-            success = true;
-        } else {
+        secondarySuccess = readSensorScan(_sensor_secondary, data.secondary);
+        if(!secondarySuccess){
             DEBUG_PRINTLN("[BME688] Secondary sensor read error");
         }
     }
 
     //
-    if(success){
-        calculateDeltas(data);
+    if(primarySuccess || secondarySuccess){
+        if(primarySuccess && secondarySuccess){
+            calculateDeltas(data);
+        }
+        else{
+            data.delta_temp = data.delta_hum = data.delta_pres = data.delta_gas_avg = 0;
+        }
 
         //apply any calibrations
         if(_calibration_data.calibrated){
-            applyCalibration(data.primary, true);
-            applyCalibration(data.secondary, false);
+            if(primarySuccess){
+                applyCalibration(data.primary, true);
+            }
+            if(secondarySuccess){
+                applyCalibration(data.secondary, false);
+            }
         }
 
-        updateStats(data);
+        if(primarySuccess || secondarySuccess){
+            updateStats(data);
+        }
 
         //accumuulate
         if(_isCalibrating){
@@ -307,7 +325,7 @@ bool BME688Handler::readParallelScan(dual_sensor_data_t &data){
     else{
         _last_error = ERROR_SENSOR_READ;
     }
-    return success;
+    return (primarySuccess || secondarySuccess);
 }
 
 
@@ -316,6 +334,8 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
     data.timestamp = millis();
 
     bool success = false;
+    bool primarySingleSuccess = false;
+    bool secondarySingleSuccess = false;
 
     //primary
     if(_primary_ready){
@@ -335,19 +355,47 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
         }
     }
 
+    //fallback
+    sensor_data_t singleData;
+    if(_primary_ready && readSingleReading(_sensor_primary, singleData)){
+        primarySingleSuccess = true;
+        for(uint8_t i=0; i< BME688_NUM_HEATER_STEPS; i++){
+            data.primary.temperatures[i] = singleData.temperature;
+            data.primary.humidities[i] = singleData.humidity;
+            data.primary.pressures[i] = singleData.pressure;
+        }
+        data.primary.validReadings = max<uint8_t>(data.primary.validReadings, 1);
+        data.primary.complete = (data.primary.validReadings > 0);
+    }
+    if(_secondary_ready && readSingleReading(_sensor_secondary, singleData)){
+        secondarySingleSuccess = true;
+        for(uint8_t i=0; i< BME688_NUM_HEATER_STEPS; i++){
+            data.secondary.temperatures[i] = singleData.temperature;
+            data.secondary.humidities[i] = singleData.humidity;
+            data.secondary.pressures[i] = singleData.pressure;
+        }
+        data.secondary.validReadings = max<uint8_t>(data.secondary.validReadings, 1);
+        data.secondary.complete = (data.secondary.validReadings > 0);
+    }
+
     //
+    success = success || primarySingleSuccess || secondarySingleSuccess;
+
     if(success){
         calculateDeltas(data);
 
         //apply any calibrations
         if(_calibration_data.calibrated){
-            applyCalibration(data.primary, true);
-            applyCalibration(data.secondary, false);
+            if(data.primary.validReadings > 0){
+                applyCalibration(data.primary, true);
+            }
+            if(data.secondary.validReadings > 0){
+                applyCalibration(data.secondary, false);
+            }
         }
 
         updateStats(data);
 
-        //accumuulate
         if(_isCalibrating){
             accumulateCalibrationData(data);
         }
@@ -365,15 +413,31 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
     memset(&scan,0,sizeof(scan));
     scan.timestamp = millis();
 
+    bool seen[BME688_NUM_HEATER_STEPS];
+    memset(seen, 0, sizeof(seen));    
+
     uint8_t readings=0;
 
     //set parallel mode
     sensor.setOpMode(BME68X_PARALLEL_MODE);
 
-    uint32_t timeout = millis() + 5000; //5s timeout
+    uint32_t dur = 0;
 
+    for(uint8_t i=0; i<_current_profile.steps; i++){
+        dur += _current_profile.durations[i];
+    }
+    if(dur ==0){
+        dur = (uint32_t)_current_profile.steps * BME688_HEATER_DURATION;
+    }
+
+    const uint32_t perStepUs = sensor.getMeasDur(BME68X_PARALLEL_MODE);
+    const uint32_t perStepMs = (perStepUs + 999U) / 1000U; 
+    const uint32_t sweepMs = (perStepMs + 1U) * _current_profile.steps; 
+    const uint32_t timeout = millis() + dur + sweepMs + SCAN_EXTRA_TIMEOUT_MS;
+
+    uint32_t lastProgressMs = millis();
     while(scan.validReadings < _current_profile.steps && millis() < timeout){
-        delayMicroseconds(sensor.getMeasDur(BME68X_PARALLEL_MODE));
+        delayMicroseconds(perStepUs);
 
         readings = sensor.fetchData();
 
@@ -382,19 +446,26 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
             sensor.getData(data);
             uint8_t idx = data.gas_index;
 
-            if(idx < BME688_NUM_HEATER_STEPS){
+            if(idx < BME688_NUM_HEATER_STEPS && !seen[idx]){
                 scan.temperatures[idx] = data.temperature;
                 scan.humidities[idx] = data.humidity;
                 scan.pressures[idx] = data.pressure / 100.0f; //hPa
                 scan.gas_resistances[idx] = data.gas_resistance;
+                seen[idx] = true;
                 scan.validReadings++;
+                lastProgressMs = millis();
             }
+        }
+
+        if((millis() - lastProgressMs) >= SCAN_PROGRESS_GUARD_MS){
+            DEBUG_PRINTLN("[BME688] Scan stalled, exiting early");
+            break;
         }
     }
 
     scan.complete = (scan.validReadings >= _current_profile.steps);
     DEBUG_PRINTF("[BME688] Sensor scan complete. Valid readings: %d/%d\n", scan.validReadings, _current_profile.steps);
-    return (scan.validReadings > 0);
+    return scan.validReadings > 0;
 }
 
 bool BME688Handler::readPrimaryScan(sensor_scan_t &data){
@@ -433,6 +504,14 @@ bool BME688Handler::readSingleReading(Bme68x &sensor, sensor_data_t &data){
     memset(&data, 0, sizeof(data));
     data.timestamp = millis();
 
+    //
+    uint16_t zeroTemp[1] = {0};
+    uint16_t zeroDur[1] = {0};
+
+    //disable heater
+    sensor.setHeaterProf(zeroTemp, zeroDur, 1);
+    sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
+
     sensor.setOpMode(BME68X_FORCED_MODE);
     delayMicroseconds(sensor.getMeasDur(BME68X_FORCED_MODE));
 
@@ -446,14 +525,133 @@ bool BME688Handler::readSingleReading(Bme68x &sensor, sensor_data_t &data){
         data.gas_index = bmeData.gas_index;
         data.status = bmeData.status;
         data.valid = true;
+        setHeaterProfile(_current_profile);
+        setOperatingMode(_current_mode);
+
         return true;
     }
+    setHeaterProfile(_current_profile);
+    setOperatingMode(_current_mode);
     _last_error = ERROR_SENSOR_READ;
     return false;
 }
 
+void BME688Handler::resetScanContext(scan_context_t &ctx){
+    ctx.active = false;
+    memset(ctx.seen, 0, sizeof(ctx.seen));
+    ctx.expectedSteps = 0;
+    ctx.timeoutMs = 0;
+    ctx.startMs = 0;
+    ctx.lastProgressMs = 0;
+}
+
+bool BME688Handler::beginNonBlockingScan(){
+    if(!isReady()){
+        _last_error = ERROR_SENSOR_READ;
+        return false;
+    }
+
+    resetScanContext(_primary_scan_ctx);
+    resetScanContext(_secondary_scan_ctx);
+    memset(&_scan_buffer, 0, sizeof(_scan_buffer));
+    _scan_buffer.timestamp = millis();
+
+    const uint8_t steps = (_current_profile.steps > 0) ? _current_profile.steps : BME688_NUM_HEATER_STEPS;
+
+    auto computeTimeout = [&](Bme68x &sensor){
+        uint32_t heaterDur = 0;
+        for(uint8_t i=0; i<steps; i++){
+            heaterDur += _current_profile.durations[i];
+        }
+        if(heaterDur == 0){
+            heaterDur = (uint32_t)steps * BME688_HEATER_DURATION;
+        }
+
+        //getMeasDur returns microseconds
+        uint32_t perStepUs = sensor.getMeasDur(BME68X_PARALLEL_MODE);
+        uint32_t perStepMs = (perStepUs + 999U) / 1000U; //ceil to ms
+        uint32_t sweepMs = steps * (perStepMs + 10U);
+        return millis() + heaterDur + sweepMs + SCAN_EXTRA_TIMEOUT_MS;
+    };
+
+    if(_primary_ready){
+        resetScanContext(_primary_scan_ctx);
+        _primary_scan_ctx.active = true;
+        _primary_scan_ctx.expectedSteps = steps;
+        _primary_scan_ctx.startMs = millis();
+        _primary_scan_ctx.timeoutMs = computeTimeout(_sensor_primary);
+        _primary_scan_ctx.lastProgressMs = _primary_scan_ctx.startMs;
+        configureParallelMode(_sensor_primary);
+        _sensor_primary.setOpMode(BME68X_PARALLEL_MODE);
+    }
+
+    if(_secondary_ready){
+        resetScanContext(_secondary_scan_ctx);
+        _secondary_scan_ctx.active = true;
+        _secondary_scan_ctx.expectedSteps = steps;
+        _secondary_scan_ctx.startMs = millis();
+        _secondary_scan_ctx.timeoutMs = computeTimeout(_sensor_secondary);
+        _secondary_scan_ctx.lastProgressMs = _secondary_scan_ctx.startMs;
+        configureParallelMode(_sensor_secondary);
+        _sensor_secondary.setOpMode(BME68X_PARALLEL_MODE);
+    }
+
+    _scan_active = _primary_scan_ctx.active || _secondary_scan_ctx.active;
+
+    if(!_scan_active){
+        _last_error = ERROR_SENSOR_READ;
+    }
+
+    return _scan_active;
+}
+
+bool BME688Handler::pollScanContext(Bme68x &sensor, sensor_scan_t &scan, scan_context_t &ctx){
+    if(!ctx.active){
+        return false;
+    }
+
+    uint8_t prevReadings = scan.validReadings;
+    uint8_t readings = sensor.fetchData();
+
+    for(uint8_t i=0; i<readings; i++){
+        bme68xData data;
+        sensor.getData(data);
+        uint8_t idx = data.gas_index;
+
+        if(idx < BME688_NUM_HEATER_STEPS && !ctx.seen[idx]){
+            scan.temperatures[idx] = data.temperature;
+            scan.humidities[idx] = data.humidity;
+            scan.pressures[idx] = data.pressure / 100.0f;
+            scan.gas_resistances[idx] = data.gas_resistance;
+            ctx.seen[idx] = true;
+            scan.validReadings++;
+        }
+    }
+
+    if(scan.validReadings > prevReadings){
+        ctx.lastProgressMs = millis();
+    }
+
+    uint32_t nowMs = millis();
+    bool timedOut = nowMs >= ctx.timeoutMs;
+    bool stalled = (ctx.lastProgressMs > 0) && ((nowMs - ctx.lastProgressMs) >= SCAN_PROGRESS_GUARD_MS);
+
+    if((scan.validReadings >= ctx.expectedSteps) || timedOut || stalled){
+        scan.complete = (scan.validReadings >= ctx.expectedSteps);
+        ctx.active = false;
+        return true;
+    }
+
+    return false;
+}
+
+bool BME688Handler::isScanActive() const {
+    return _scan_active;
+}
+
 void BME688Handler::calculateDeltas(dual_sensor_data_t &data){
-    if(!data.primary.complete || !data.secondary.complete){
+    uint8_t count = min(data.primary.validReadings, data.secondary.validReadings);
+    if(count==0){
         data.delta_temp = 0;
         data.delta_hum = 0;
         data.delta_pres = 0;
@@ -461,12 +659,10 @@ void BME688Handler::calculateDeltas(dual_sensor_data_t &data){
         return;
     }
 
-    //calculate averages
     float temp_p = 0, temp_s = 0;
     float hum_p = 0, hum_s = 0;
     float pres_p = 0, pres_s = 0;
     float gas_p = 0, gas_s = 0;
-    uint8_t count = _current_profile.steps;
 
     for(uint8_t i=0; i< count; i++){
         temp_p += data.primary.temperatures[i];
@@ -505,6 +701,22 @@ bool BME688Handler::startCalibration(uint16_t samples){
     _calibration_pres_sum_p = _calibration_pres_sum_s = 0.0f;
     memset(_calibration_gas_sum_p,0,sizeof(_calibration_gas_sum_p));
     memset(_calibration_gas_sum_s,0,sizeof(_calibration_gas_sum_s));
+
+    //use a shorter heater sweep
+    if(!_has_saved_profile){
+        memcpy(&_saved_profile, &_current_profile, sizeof(_current_profile));
+        _has_saved_profile = true;
+    }
+
+    heater_profile_t fast_profile;
+    uint8_t steps = (_current_profile.steps > 0) ? min<uint8_t>(_current_profile.steps, 5) : 5;
+    memcpy(fast_profile.temperatures, _current_profile.temperatures, steps * sizeof(uint16_t));
+    for(uint8_t i=0; i<steps; i++){
+        fast_profile.durations[i] = 80;
+    }
+    fast_profile.steps = steps;
+    fast_profile.profile_name = "CalibFast";
+    setHeaterProfile(fast_profile);
 
     DEBUG_PRINTLN("[BME688] Calibration started");
     return true;
@@ -586,6 +798,11 @@ bool BME688Handler::finishCalibration(){
     DEBUG_PRINTLN("[BME688] Calibration finished");
     printCalibrationData();
     saveCalibration();
+
+    if(_has_saved_profile){
+        setHeaterProfile(_saved_profile);
+        _has_saved_profile = false;
+    }
     return true;
 }
 

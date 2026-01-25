@@ -1,4 +1,12 @@
 #include "data_logger.h"
+#include <ctype.h>
+
+static const char LOG_HEADER[] = "timestamp,label,temp1,hum1,pres1,gas1_0,gas1_1,gas1_2,gas1_3,gas1_4,"
+                                 "gas1_5,gas1_6,gas1_7,gas1_8,gas1_9,"
+                                 "temp2,hum2,pres2,gas2_0,gas2_1,gas2_2,gas2_3,gas2_4,"
+                                 "gas2_5,gas2_6,gas2_7,gas2_8,gas2_9,"
+                                 "delta_temp,delta_hum,delta_pres,delta_gas,"
+                                 "pred_class,pred_conf,anomaly_score,iaq";
 
 DataLogger::DataLogger():
     _buffer(nullptr),
@@ -40,7 +48,13 @@ bool DataLogger::begin(){
     pinMode(SD_CS_PIN, OUTPUT);
     digitalWrite(SD_CS_PIN, HIGH);
 
-    if(SD.begin(SD_CS_PIN)){
+    bool sdOk = SD.begin(SD_CS_PIN);
+    if(!sdOk){
+        DEBUG_PRINTLN(F("[DataLogger] SD init failed, retrying at alternate speed..."));
+        sdOk = SD.begin(SD_CS_PIN, SPI_FULL_SPEED, SPI);
+    }
+
+    if(sdOk){
         _using_sd = true;
         DEBUG_PRINTLN(F("[DataLogger] SD card initialized."));
     }
@@ -49,6 +63,7 @@ bool DataLogger::begin(){
         //init littlefs
         if(!LittleFS.begin()){
             DEBUG_PRINTLN("[DataLogger] mount failed");
+            return false;
         }
         _using_sd = false;
         DEBUG_PRINTLN("[DataLogger] LittleFS initialized.");
@@ -67,7 +82,8 @@ bool DataLogger::begin(){
     //find highest existing file id
     {
         File dir = _using_sd ? SD.open("/", FILE_READ) : LittleFS.open("/", "r");
-        const char* base = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME +1 : DATA_LOG_FILENAME;
+        const char* base = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME + 1 : DATA_LOG_FILENAME;
+        String baseFile = String(base) + ".csv";
         while(dir){
             File entry = dir.openNextFile();
             if(!entry){
@@ -75,24 +91,30 @@ bool DataLogger::begin(){
             }
 
             String name = stripLeadingSlash(String(entry.name()));
-            if(name.startsWith(base)){
-                int idx = strlen(base) +1;
+            if(name.equalsIgnoreCase(baseFile)){
+                if(_file_index < 1){
+                    _file_index = 1;
+                }
+            } else if(name.startsWith(base)){
+                int underscorePos = name.indexOf('_', strlen(base));
                 int dot = name.indexOf('.');
 
-                if(dot > idx){
-                    int idx = name.substring(idx,dot).toInt();
-                    if(idx >= _file_index){
-                        _file_index = idx +1;
+                if(underscorePos > 0 && dot > underscorePos){
+                    int idxVal = name.substring(underscorePos + 1, dot).toInt();
+                    if(idxVal >= _file_index){
+                        _file_index = idxVal + 1;
                     }
                 }
             }
             entry.close();
-                
         }
         dir.close();
-        
     }
     DEBUG_PRINTF("[DataLogger] Initialization complete. Next log file index: %d\n", _file_index);
+
+    //ensure a default log exists
+    String defaultFile = String(DATA_LOG_FILENAME) + ".csv";
+    ensureFileExists(defaultFile.c_str());
     return true;
 }
 
@@ -114,13 +136,55 @@ bool DataLogger::startLogging(const char *filename){
         DEBUG_PRINTLN(F("[DataLogger] Warning: Logging already in progress."));
         return true;
     }
+
+    if(!_using_sd){
+        DEBUG_PRINTLN(F("[DataLogger] Attempting late SD init..."));
+        SPI.setRX(SD_MISO_PIN);
+        SPI.setSCK(SD_SCK_PIN);
+        SPI.setTX(SD_MOSI_PIN);
+        pinMode(SD_CS_PIN, OUTPUT);
+        digitalWrite(SD_CS_PIN, HIGH);
+
+        bool sdOk = SD.begin(SD_CS_PIN);
+        if(!sdOk){
+            DEBUG_PRINTLN(F("[DataLogger] SD init failed, retrying at alternate speed..."));
+            sdOk = SD.begin(SD_CS_PIN, SPI_FULL_SPEED, SPI);
+        }
+        if(sdOk){
+            _using_sd = true;
+            DEBUG_PRINTLN(F("[DataLogger] SD card initialized (late init)."));
+        } else {
+            DEBUG_PRINTLN(F("[DataLogger] SD late init failed; continuing with LittleFS."));
+        }
+    }
+    if(filename == nullptr){
+        _file_index = 0;
+    }
+
     if(filename != nullptr){
         _current_filename = normalisePath(String(filename));
     }
     else{
         _current_filename = generateFilename();
     }
-    return createNewLogFile();
+
+    bool ok = createNewLogFile();
+    if(!ok && _using_sd){
+        DEBUG_PRINTF("[DataLogger] startLogging failed on SD for %s, falling back to LittleFS\n", _current_filename.c_str());
+        _using_sd = false;
+        if(!LittleFS.begin()){
+            DEBUG_PRINTLN(F("[DataLogger] LittleFS mount failed during fallback"));
+            return false;
+        }
+        ok = createNewLogFile();
+    }
+
+    if(!ok){
+        DEBUG_PRINTF("[DataLogger] startLogging failed creating %s on %s\n", _current_filename.c_str(), _using_sd ? "SD" : "LittleFS");
+        return false;
+    }
+    DEBUG_PRINTF("[DataLogger] startLogging target=%s fs=%s ok=%d\n", _current_filename.c_str(), _using_sd ? "SD" : "LittleFS", ok);
+    return ok;
 }
 
 bool DataLogger::stopLogging(){
@@ -141,6 +205,12 @@ bool DataLogger::isLogging() const{
 
 bool DataLogger::logEntry(const dual_sensor_data_t &data, const ml_prediction_t *pred){
     if(!_is_logging || !_buffer){
+        return false;
+    }
+
+    if(!_log_file){
+        DEBUG_PRINTLN(F("[DataLogger] Warning: no open log file; stopping logging."));
+        _is_logging = false;
         return false;
     }
 
@@ -220,12 +290,12 @@ bool DataLogger::isBufferFull() const{
     return _buffer_count >= _buffer_size;
 }
 
-size_t getUsedSpace() {
+size_t DataLogger::getUsedSpace() const{
 
     return 0;
 }
 
-size_t getFreeSpace() {
+size_t DataLogger::getFreeSpace() const{
     
     return 0;
 }
@@ -236,13 +306,13 @@ size_t getFreeSpace() {
 //===========================================================================================================
 String DataLogger::normalisePath(const String &name) const{
     if(name.length()==0){
-        return String("/");
+        return "/";
     }
     if(name.startsWith("/")){
         return name;
     }
-    return "/" + name;
-}
+        return "/" + name;
+    }
 
 String DataLogger::stripLeadingSlash(const String &name) const{
     if(name.startsWith("/")){
@@ -250,6 +320,13 @@ String DataLogger::stripLeadingSlash(const String &name) const{
     }
     return name;
 
+}
+
+String DataLogger::toFsPath(const String &path) const{
+    if(_using_sd){
+        return stripLeadingSlash(path);
+    }
+    return path;
 }
 
 //===========================================================================================================
@@ -262,20 +339,32 @@ bool DataLogger::createNewLogFile(){
     }
 
     String path = normalisePath(_current_filename);
+    String fsPath = _using_sd ? toFsPath(path) : path;
+    bool exists = _using_sd ? SD.exists(fsPath.c_str()) : LittleFS.exists(fsPath);
+
     if(_using_sd){
-        _log_file = SD.open(path.c_str(), FILE_WRITE);
+        _log_file = SD.open(fsPath.c_str(), FILE_WRITE);
     }
     else{
-        _log_file = LittleFS.open(path.c_str(), "w");
+        _log_file = LittleFS.open(fsPath, exists ? "a" : "w");
     }
 
     if(!_log_file){
-        DEBUG_PRINTF("[DataLogger] Error: Failed to create log file %s\n", _current_filename.c_str());
+        DEBUG_PRINTF("[DataLogger] Error: Failed to open log file %s\n", _current_filename.c_str());
         return false;
     }
 
-    //header
-    writeHeader();
+    //write header only for fresh files
+    if(!exists || _log_file.size() == 0){
+        if(!writeHeader()){
+            DEBUG_PRINTLN(F("[DataLogger] Error: Failed to write header; closing file."));
+            closeLogFile();
+            return false;
+        }
+    }
+
+    //append at end
+    _log_file.seek(_log_file.size());
 
     _file_entry_count=0;
     _is_logging=true;
@@ -310,10 +399,49 @@ uint32_t DataLogger::getTotalLoggedEntries() const{
 }
 
 String DataLogger::generateFilename(){
-    char filename[32];
+    char filename[64];
     const char* baseName = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME + 1 : DATA_LOG_FILENAME;
-    snprintf(filename, sizeof(filename), "/%s_%04d.csv", baseName, _file_index++);
+
+    String suffix;
+    if(_active_label >= SCENT_CLASS_TYPE_1 && _active_label < SCENT_CLASS_COUNT){
+        suffix = sanitizeLabel(SCENT_CLASS_NAMES[_active_label]);
+    }
+
+    if(suffix.length() == 0){
+        //unlabeled or unknown -> base name
+        if(_file_index == 0){
+            snprintf(filename, sizeof(filename), "/%s.csv", baseName);
+        } else {
+            snprintf(filename, sizeof(filename), "/%s_%04d.csv", baseName, _file_index);
+        }
+    } else {
+        if(_file_index == 0){
+            snprintf(filename, sizeof(filename), "/%s_%s.csv", baseName, suffix.c_str());
+        } else {
+            snprintf(filename, sizeof(filename), "/%s_%s_%04d.csv", baseName, suffix.c_str(), _file_index);
+        }
+    }
+
     return String(filename);
+}
+
+String DataLogger::sanitizeLabel(const char* label) const{
+    if(label == nullptr){
+        return String();
+    }
+
+    String out;
+    for(size_t i = 0; label[i] != '\0'; ++i){
+        char c = label[i];
+        if(isalnum(static_cast<unsigned char>(c))){
+            out += c;
+        }
+        else if(c == ' ' || c == '-' || c == '_'){
+            out += '_';
+        }
+        //ignore other characters
+    }
+    return out;
 }
 
 bool DataLogger::writeHeader(){
@@ -322,12 +450,10 @@ bool DataLogger::writeHeader(){
     }
 
     //csv header
-    _log_file.println(F("timestamp,label,temp1,hum1,pres1,gas1_0,gas1_1,gas1_2,gas1_3,gas1_4,"\
-                        "gas1_5,gas1_6,gas1_7,gas1_8,gas1_9,"
-                        "temp2,hum2,pres2,gas2_0,gas2_1,gas2_2,gas2_3,gas2_4,"
-                        "gas2_5,gas2_6,gas2_7,gas2_8,gas2_9,"
-                        "delta_temp,delta_hum,delta_pres,delta_gas,"
-                        "pred_class,pred_conf,anomaly_score,iaq"));
+    if(_log_file.println(LOG_HEADER) == 0){
+        return false;
+    }
+    _log_file.flush();
     return true;
 }
 
@@ -347,10 +473,31 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     }
 
     //sensor data
+    auto meanOfValid = [](const float* data, uint8_t count){
+        if(count==0){
+            return 0.0f;
+        }
+        float sum=0.0f;
+        for(uint8_t i=0; i<count; i++){
+            sum += data[i];
+        }
+        return sum / (float)count;
+    };
+
+    auto checkMean = [&](const float *data, uint8_t count){
+        if(count ==0){
+            return 0.0f;
+        }
+        if(count==1){
+            return data[0];
+        }
+        return meanOfValid(data, count);
+    };
+
     _log_file.printf("%.2f,%.2f,%.2f,",
-    entry.sensor_data.primary.temperatures[0],
-    entry.sensor_data.primary.humidities[0],
-    entry.sensor_data.primary.pressures[0]);
+    checkMean(entry.sensor_data.primary.temperatures, entry.sensor_data.primary.validReadings),
+    checkMean(entry.sensor_data.primary.humidities, entry.sensor_data.primary.validReadings),
+    checkMean(entry.sensor_data.primary.pressures, entry.sensor_data.primary.validReadings));
 
     //gas value
     for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
@@ -359,9 +506,9 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
 
     //secondary sensor
     _log_file.printf("%.2f,%.2f,%.2f,",
-    entry.sensor_data.secondary.temperatures[0],
-    entry.sensor_data.secondary.humidities[0],
-    entry.sensor_data.secondary.pressures[0]);
+    checkMean(entry.sensor_data.secondary.temperatures, entry.sensor_data.secondary.validReadings),
+    checkMean(entry.sensor_data.secondary.humidities, entry.sensor_data.secondary.validReadings),
+    checkMean(entry.sensor_data.secondary.pressures, entry.sensor_data.secondary.validReadings));
 
     //gas value
     for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
@@ -426,6 +573,7 @@ bool DataLogger::checkFileRotation(){
         flush();
         closeLogFile();
 
+        _file_index++;
         _current_filename = generateFilename();
         return createNewLogFile();
     }
@@ -464,13 +612,14 @@ bool DataLogger::deleteLogFile(const char* filename){
     }
 
     String path = normalisePath(String(filename));
+    String fsPath = _using_sd ? toFsPath(path) : path;
 
     if(_is_logging && _current_filename == path){
         DEBUG_PRINTLN(F("[DataLogger] Error: Cannot delete active log file."));
         return false;
     }
 
-    bool removed =  _using_sd ? SD.remove(path.c_str()) : LittleFS.remove(path);
+    bool removed =  _using_sd ? SD.remove(fsPath.c_str()) : LittleFS.remove(fsPath);
     if(removed){
         DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", path.c_str());
         return true;
@@ -499,11 +648,13 @@ bool DataLogger::deleteAllLogFiles(){
         String name = stripLeadingSlash(String(file.name()));
 
         if(name.startsWith(base)){
+            String path = normalisePath(name);
+            String fsPath = _using_sd ? toFsPath(path) : path;
             if(_using_sd){
-                SD.remove(normalisePath(name).c_str());
+                SD.remove(fsPath.c_str());
             }
             else{
-                LittleFS.remove(normalisePath(name));
+                LittleFS.remove(fsPath);
             }
             DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", name.c_str());
         }
@@ -526,7 +677,8 @@ bool DataLogger::exportToSerial(const char* filename){
     }
 
     String name = normalisePath(String(filename));
-    File file = _using_sd ? SD.open(name.c_str(), FILE_READ) : LittleFS.open(name.c_str(), "r");
+    String fsPath = _using_sd ? toFsPath(name) : name;
+    File file = _using_sd ? SD.open(fsPath.c_str(), FILE_READ) : LittleFS.open(fsPath.c_str(), "r");
     if(!file){
         DEBUG_PRINTF("[DataLogger] Error: Failed to open log file %s for export\n", name.c_str());
         return false;
@@ -540,6 +692,40 @@ bool DataLogger::exportToSerial(const char* filename){
 
     file.close();
     Serial.println(F("End log export."));
+    return true;
+}
+
+//===========================================================================================================
+//utility
+//===========================================================================================================
+
+bool DataLogger::ensureFileExists(const char* filename){
+    if(!_init){
+        return false;
+    }
+
+    String path = normalisePath(String(filename));
+    String fsPath = _using_sd ? toFsPath(path) : path;
+
+    bool exists = _using_sd ? SD.exists(fsPath.c_str()) : LittleFS.exists(fsPath);
+    if(exists){
+        return true;
+    }
+
+    File f = _using_sd ? SD.open(fsPath.c_str(), FILE_WRITE) : LittleFS.open(fsPath.c_str(), "w");
+    if(!f){
+        DEBUG_PRINTF("[DataLogger] Error: Failed to create file %s\n", path.c_str());
+        return false;
+    }
+
+    if(f.println(LOG_HEADER) == 0){
+        DEBUG_PRINTF("[DataLogger] Error: Failed to write header to %s\n", path.c_str());
+        f.close();
+        return false;
+    }
+    f.flush();
+    f.close();
+    DEBUG_PRINTF("[DataLogger] Created default log file %s\n", path.c_str());
     return true;
 }
 
