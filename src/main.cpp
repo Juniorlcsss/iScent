@@ -26,6 +26,13 @@ uint32_t lastSampleTime = 0;
 uint32_t lastInferenceTime = 0;
 uint32_t lastDisplayUpdateTime = 0;
 uint32_t warmupStartTime = 0;
+uint32_t lastCalibDebugTime = 0;
+float lastCalibLoggedProgress = -1.0f;
+uint32_t lastCalibProgressMs = 0;
+float lastCalibProgressVal = -1.0f;
+uint32_t calibStartTime = 0;
+const uint32_t CALIB_TIMEOUT_MARGIN_MS = 60000UL;
+const uint32_t CALIB_MAX_DURATION_MS = (uint32_t)(BME688_GAS_BASE_SAMPLES * (BME688_SAMPLE_RATE + 500UL)) + CALIB_TIMEOUT_MARGIN_MS;
 
 dual_sensor_data_t currentSensorData;
 ml_prediction_t currentPrediction;
@@ -282,6 +289,7 @@ void initialiseSystem(){
         }
     }
     sensors.printSensorData();
+    sensors.setDefaultHeaterProfile();
 
 
     //init ML
@@ -356,9 +364,45 @@ void handleStateMachine(){
                 }
             }
 
+            if(sensors.isCalibrating()){
+                float prog = sensors.getCalibrationProgress();
+                uint32_t now = millis();
+                if((prog - lastCalibLoggedProgress) >= 0.05f || (now - lastCalibDebugTime) >= 2000){
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "prog=%.3f samples=%lu", prog, sensors.getSampleCount());
+                    logger.logCalibDebug(String(buf));
+                    lastCalibLoggedProgress = prog;
+                    lastCalibDebugTime = now;
+                }
+
+                if(prog > lastCalibProgressVal + 0.001f){
+                    lastCalibProgressVal = prog;
+                    lastCalibProgressMs = now;
+                } else if(now - lastCalibProgressMs > 45000UL){
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "CALIB_STALL prog=%.3f dt=%lu err=%s", prog, (unsigned long)(now - lastCalibProgressMs), sensors.getLastErrorString());
+                    logger.logCalibDebug(String(buf));
+                    logger.logCalibDebug("CALIB_PARTIAL_SAVE_STALL");
+                    sensors.finishCalibration();        
+                    logger.flushCalibDebug();
+                    rp2040.reboot();
+                }
+
+                if(calibStartTime > 0 && (now - calibStartTime) > CALIB_MAX_DURATION_MS){
+                    logger.logCalibDebug("CALIB_TIMEOUT_SAVE");
+                    sensors.finishCalibration();        //save partial calibration
+                    logger.flushCalibDebug();
+                    rp2040.reboot();
+                }
+            }
+
             if(!sensors.isCalibrating()){
                 DEBUG_PRINTLN(F("[STATE] Calibration complete."));
-                enterState(STATE_IDLE);
+                logger.logCalibDebug("CALIB_DONE");
+                logger.flushCalibDebug();
+                DEBUG_PRINTLN(F("[STATE] Rebooting to load saved calibration..."));
+                delay(100);
+                rp2040.reboot();
             }
             break;
 
@@ -414,6 +458,7 @@ void enterState(system_state_t newState){
     switch(currentState){
         case STATE_CALIBRATING:
             sensors.finishCalibration();
+            calibStartTime = 0;
             break;
         
         case STATE_LOGGING:
@@ -453,6 +498,13 @@ void enterState(system_state_t newState){
             break;
 
         case STATE_CALIBRATING:
+            lastCalibLoggedProgress = -1.0f;
+            lastCalibDebugTime = 0;
+            lastCalibProgressMs = millis();
+            lastCalibProgressVal = -1.0f;
+            calibStartTime = millis();
+            logger.startCalibDebug();
+            logger.logCalibDebug("CALIB_START");
             sensors.startCalibration(BME688_GAS_BASE_SAMPLES);
             break;
 
@@ -482,14 +534,60 @@ void enterState(system_state_t newState){
 //===========================================================================================================
 
 bool performSampling(){
-    bool ready = sensors.performFullScan(currentSensorData);
+    dual_sensor_data_t ambientData;
+    if(!sensors.performFullScan(ambientData)){
+        if(sensors.getLastError() != ERROR_NONE){
+            lastError = ERROR_SENSOR_READ;
+        }
+        return false;
+    }
+
+    if(!sensors.readParallelScan(currentSensorData)){
+        if(sensors.getLastError() != ERROR_NONE){
+            lastError = ERROR_SENSOR_READ;
+        }
+        return false;
+    }
+
+    currentSensorData.primary.temperatures[0] = ambientData.primary.temperatures[0];
+    currentSensorData.primary.humidities[0]   = ambientData.primary.humidities[0];
+    currentSensorData.primary.pressures[0]    = ambientData.primary.pressures[0];
+    currentSensorData.primary.validReadings   = ambientData.primary.validReadings;
+
+    currentSensorData.secondary.temperatures[0] = ambientData.secondary.temperatures[0];
+    currentSensorData.secondary.humidities[0]   = ambientData.secondary.humidities[0];
+    currentSensorData.secondary.pressures[0]    = ambientData.secondary.pressures[0];
+    currentSensorData.secondary.validReadings   = ambientData.secondary.validReadings;
+
+    //dltas
+    currentSensorData.delta_temp = ambientData.primary.temperatures[0] - ambientData.secondary.temperatures[0];
+    currentSensorData.delta_hum  = ambientData.primary.humidities[0]   - ambientData.secondary.humidities[0];
+    currentSensorData.delta_pres = ambientData.primary.pressures[0]    - ambientData.secondary.pressures[0];
+
+    bool ready = true;
 
     if(!ready){
         if(sensors.getLastError() != ERROR_NONE){
             DEBUG_PRINTLN(F("[ERROR] Sensor read failed during sampling!"));
+            if(currentState == STATE_CALIBRATING){
+                char buf[96];
+                snprintf(buf, sizeof(buf), "calib read fail err=%s prog=%.2f", sensors.getLastErrorString(), sensors.getCalibrationProgress());
+                logger.logCalibDebug(String(buf));
+            }
             lastError = ERROR_SENSOR_READ;
         }
         return false;
+    }
+
+    if(sensors.isCalibrating()){
+        char buf[128];
+        snprintf(buf, sizeof(buf), "calib ok prog=%.2f prim_complete=%d sec_complete=%d vP=%d vS=%d",
+            sensors.getCalibrationProgress(),
+            currentSensorData.primary.complete,
+            currentSensorData.secondary.complete,
+            currentSensorData.primary.validReadings,
+            currentSensorData.secondary.validReadings);
+        logger.logCalibDebug(String(buf));
     }
 
     ml.addToWindow(currentSensorData);

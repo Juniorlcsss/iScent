@@ -42,6 +42,11 @@ public:
     bool logRawData(const dual_sensor_data_t &data);//
     bool logPrediction(const ml_prediction_t &pred);//
 
+    //calib debug
+    void startCalibDebug();
+    void logCalibDebug(const String &line);
+    bool flushCalibDebug();
+
     //===========================================================================================================
     //memory
     //===========================================================================================================
@@ -111,6 +116,13 @@ private:
     int16_t _active_label;
     String normalisePath(const String &path) const;
     String stripLeadingSlash(const String &path) const;
+
+    //calib debug state
+    static const uint8_t CALIB_DEBUG_MAX_LINES = 64;
+    String _calib_debug_buffer[CALIB_DEBUG_MAX_LINES];
+    uint8_t _calib_debug_count;
+    uint32_t _calib_debug_last_ms;
+    bool _calib_debug_active;
 
     //===========================================================================================================
     //methods

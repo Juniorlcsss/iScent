@@ -5,6 +5,10 @@
 #define SCAN_PROGRESS_GUARD_MS 500U
 #define SCAN_EXTRA_TIMEOUT_MS 200U
 
+//for ratio
+static float g_iaq_baseline_primary = 0.0f;
+static float g_iaq_baseline_secondary = 0.0f;
+
 BME688Handler::BME688Handler():
     _wire_primary(nullptr),
     _wire_secondary(nullptr),
@@ -18,7 +22,9 @@ BME688Handler::BME688Handler():
     _calibration_temp_sum_p(0),
     _last_error(ERROR_NONE),
     _has_saved_profile(false),
-    _scan_active(false)
+    _scan_active(false),
+    _auto_baseline_set(false),
+    _baseline_wait_count(0)
 {
     memset(&_calibration_data, 0 , sizeof(_calibration_data));
     memset(&_primary_stats, 0, sizeof(_primary_stats));
@@ -305,21 +311,24 @@ bool BME688Handler::readParallelScan(dual_sensor_data_t &data){
 
     //
     if(primarySuccess || secondarySuccess){
-        if(primarySuccess && secondarySuccess){
-            calculateDeltas(data);
-        }
-        else{
-            data.delta_temp = data.delta_hum = data.delta_pres = data.delta_gas_avg = 0;
-        }
+        //baseline
+        ensureBaseline(data);
 
-        //apply any calibrations
-        if(_calibration_data.calibrated){
+        //apply calibration 
+        if(_calibration_data.calibrated && !_isCalibrating){
             if(primarySuccess){
                 applyCalibration(data.primary, true);
             }
             if(secondarySuccess){
                 applyCalibration(data.secondary, false);
             }
+        }
+
+        if(primarySuccess && secondarySuccess){
+            calculateDeltas(data);
+        }
+        else{
+            data.delta_temp = data.delta_hum = data.delta_pres = data.delta_gas_avg = 0;
         }
 
         if(primarySuccess || secondarySuccess){
@@ -353,6 +362,7 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
             data.primary.temperatures[i] = singleData.temperature;
             data.primary.humidities[i] = singleData.humidity;
             data.primary.pressures[i] = singleData.pressure;
+            data.primary.gas_resistances[i] = singleData.gas_resistance;
         }
         data.primary.validReadings = max<uint8_t>(data.primary.validReadings, 1);
         data.primary.complete = (data.primary.validReadings > 0);
@@ -364,6 +374,7 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
             data.secondary.temperatures[i] = singleData.temperature;
             data.secondary.humidities[i] = singleData.humidity;
             data.secondary.pressures[i] = singleData.pressure;
+            data.secondary.gas_resistances[i] = singleData.gas_resistance;
         }
         data.secondary.validReadings = max<uint8_t>(data.secondary.validReadings, 1);
         data.secondary.complete = (data.secondary.validReadings > 0);
@@ -371,10 +382,10 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
     }
 
     if(success){
-        calculateDeltas(data);
+        ensureBaseline(data);
 
-        //apply any calibrations
-        if(_calibration_data.calibrated){
+        //apply calibration 
+        if(_calibration_data.calibrated && !_isCalibrating){
             if(data.primary.validReadings > 0){
                 applyCalibration(data.primary, true);
             }
@@ -383,6 +394,7 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
             }
         }
 
+        calculateDeltas(data);
         updateStats(data);
 
         if(_isCalibrating){
@@ -427,6 +439,7 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
     uint32_t lastProgressMs = millis();
     while(scan.validReadings < _current_profile.steps && millis() < timeout){
         delayMicroseconds(perStepUs);
+        yield();
 
         readings = sensor.fetchData();
 
@@ -675,6 +688,10 @@ bool BME688Handler::startCalibration(uint16_t samples){
         return false;
     }
 
+    if(_current_profile.steps == 0){
+        setDefaultHeaterProfile();
+    }
+
     _isCalibrating = true;
     _calibration_samples = samples;
     _calibration_collected = 0;
@@ -694,9 +711,9 @@ bool BME688Handler::startCalibration(uint16_t samples){
 
     heater_profile_t fast_profile;
     uint8_t steps = (_current_profile.steps > 0) ? min<uint8_t>(_current_profile.steps, 5) : 5;
-    memcpy(fast_profile.temperatures, _current_profile.temperatures, steps * sizeof(uint16_t));
     for(uint8_t i=0; i<steps; i++){
-        fast_profile.durations[i] = 80;
+        fast_profile.temperatures[i] = _current_profile.temperatures[i] > 0 ? _current_profile.temperatures[i] : DEFAULT_HEATER_TEMPERATURES[i];
+        fast_profile.durations[i] = max<uint16_t>(DEFAULT_HEATER_DURATIONS[i], 80);
     }
     fast_profile.steps = steps;
     fast_profile.profile_name = "CalibFast";
@@ -724,6 +741,12 @@ void BME688Handler::accumulateCalibrationData(const dual_sensor_data_t &data){
     }
 
     uint8_t steps = _current_profile.steps;
+    if(steps == 0){
+        DEBUG_PRINTLN("[BME688] Invalid heater profile during calibration");
+        _last_error = ERROR_CALIBRATION_FAILED;
+        _isCalibrating = false;
+        return;
+    }
 
     //primary
     if(data.primary.complete){
@@ -759,6 +782,12 @@ bool BME688Handler::finishCalibration(){
     }
 
     uint8_t steps = _current_profile.steps;
+    if(steps == 0){
+        DEBUG_PRINTLN("[BME688] Invalid heater profile, calibration aborted");
+        _last_error = ERROR_CALIBRATION_FAILED;
+        _isCalibrating = false;
+        return false;
+    }
     float n = (float)_calibration_collected * steps;
 
     //calculate offsets
@@ -778,6 +807,13 @@ bool BME688Handler::finishCalibration(){
 
     _calibration_data.calibrated = true;
     _calibration_data.timestamp = millis();
+    
+    //
+    g_iaq_baseline_primary = _calibration_data.gas_baseline_primary[0];
+    g_iaq_baseline_secondary = _calibration_data.gas_baseline_secondary[0];
+    if(g_iaq_baseline_primary <= 0.0f && g_iaq_baseline_secondary > 0.0f){
+        g_iaq_baseline_primary = g_iaq_baseline_secondary;
+    }
     _isCalibrating = false;
     DEBUG_PRINTLN("[BME688] Calibration finished");
     printCalibrationData();
@@ -802,7 +838,80 @@ void BME688Handler::applyCalibration(sensor_scan_t &scan, bool isPrimary){
     for(uint i=0; i<_current_profile.steps; i++){
         scan.temperatures[i] -= tempOffset;
         scan.humidities[i] -= humOffset;
+
+        //apply corrections
+        scan.temperatures[i] += TEMP_CORRECTION_C;
+        scan.humidities[i] += HUM_CORRECTION_PCT;
+        scan.humidities[i] = CONSTRAIN_FLOAT(scan.humidities[i], 0.0f, 100.0f);
+
+        //gas left as ohms
+        //NOTE: Use getGasRatio() if a normalized value is required elsewhere.
     }
+}
+
+void BME688Handler::ensureBaseline(const dual_sensor_data_t &data){
+    if(_calibration_data.calibrated || _isCalibrating || _auto_baseline_set){
+        return;
+    }
+
+    const bool primOk = data.primary.validReadings > 0;
+    const bool secOk = data.secondary.validReadings > 0;
+    if(!primOk && !secOk){
+        return;
+    }
+
+    _baseline_wait_count++;
+    if(_baseline_wait_count < 5){
+        return;
+    }
+
+    auto inGasBand = [](float g){ return (g >= 1.0e4f) && (g <= 1.0e6f); };
+
+    //baselines
+    bool anyValid = false;
+    for(uint8_t i=0; i<_current_profile.steps; i++){
+        const float pGas = primOk ? data.primary.gas_resistances[i] : 0.0f;
+        const float sGas = secOk ? data.secondary.gas_resistances[i] : 0.0f;
+
+        const bool pOk = inGasBand(pGas);
+        const bool sOk = inGasBand(sGas);
+
+        float chosen = 0.0f;
+        if(pOk){
+            chosen = pGas;
+        } else if(sOk){
+            chosen = sGas;
+        }
+
+        if(chosen <= 0.0f){
+            continue;
+        }
+
+        _calibration_data.gas_baseline_primary[i] = chosen;
+        _calibration_data.gas_baseline_secondary[i] = chosen;
+        anyValid = true;
+    }
+
+    if(!anyValid){
+        return;
+    }
+
+    _calibration_data.temp_offset_primary = 0.0f;
+    _calibration_data.temp_offset_secondary = 0.0f;
+    _calibration_data.humidity_offset_primary = 0.0f;
+    _calibration_data.humidity_offset_secondary = 0.0f;
+    _calibration_data.pressure_offset_primary = 0.0f;
+    _calibration_data.pressure_offset_secondary = 0.0f;
+
+    _calibration_data.calibrated = true;
+    _calibration_data.timestamp = millis();
+    g_iaq_baseline_primary = _calibration_data.gas_baseline_primary[0];
+    g_iaq_baseline_secondary = _calibration_data.gas_baseline_secondary[0];
+    if(g_iaq_baseline_primary <= 0.0f && g_iaq_baseline_secondary > 0.0f){
+        g_iaq_baseline_primary = g_iaq_baseline_secondary;
+    }
+    _auto_baseline_set = true;
+    DEBUG_PRINTLN("[BME688] Auto baseline set from first valid scan");
 }
 
 sensor_calibration_t BME688Handler::getCalibrationData() const {
@@ -816,6 +925,8 @@ void BME688Handler::setCalibrationData(const sensor_calibration_t &calib){
 void BME688Handler::clearCalibration(){
     memset(&_calibration_data, 0, sizeof(_calibration_data));
     _calibration_data.calibrated = false;
+    g_iaq_baseline_primary = 0.0f;
+    g_iaq_baseline_secondary = 0.0f;
     DEBUG_PRINTLN("[BME688] Calibration data cleared");
 }
 
@@ -864,13 +975,30 @@ bool BME688Handler::loadCalibration(){
     size_t read = f.read((uint8_t*)&_calibration_data, sizeof(_calibration_data));
     f.close();
 
-    if(read != sizeof(_calibration_data) && !_calibration_data.calibrated){
-        DEBUG_PRINTLN("[BME688] Calibration data read failed or incomplete");
+    bool invalid = (read != sizeof(_calibration_data)) || !_calibration_data.calibrated;
+
+    //check for empty
+    bool zeroBaseline = true;
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
+        if(_calibration_data.gas_baseline_primary[i] > 0.0f || _calibration_data.gas_baseline_secondary[i] > 0.0f){
+            zeroBaseline = false;
+            break;
+        }
+    }
+
+    if(invalid || zeroBaseline){
+        DEBUG_PRINTLN("[BME688] Calibration data invalid or zero; clearing");
         clearCalibration();
         LittleFS.end();
         return false;
     }
+
     LittleFS.end();
+    g_iaq_baseline_primary = _calibration_data.gas_baseline_primary[0];
+    g_iaq_baseline_secondary = _calibration_data.gas_baseline_secondary[0];
+    if(g_iaq_baseline_primary <= 0.0f && g_iaq_baseline_secondary > 0.0f){
+        g_iaq_baseline_primary = g_iaq_baseline_secondary;
+    }
     DEBUG_PRINTLN("[BME688] Calibration data loaded");
     return true;
 }
@@ -880,23 +1008,42 @@ bool BME688Handler::loadCalibration(){
 //===========================================================================================================
 
 float BME688Handler::calculateIAQ(float gasRes, float hum){
-    //scale: 0-500
-    /*
-    
-    */
-
+    // Prefer ratio to a stored clean-air baseline so IAQ responds to VOC changes even while logging raw ohms.
     float gScore = 0.0f;
     float hScore = 0.0f;
 
-    //gas score contribution
-    if(gasRes >= 50000.0f){
-        gScore = 0.0f;
+    // Choose best-available baseline: cached primary -> cached secondary -> current reading (ratio=1 if none).
+    float baseline = g_iaq_baseline_primary;
+    if(baseline <= 0.0f){
+        baseline = g_iaq_baseline_secondary;
     }
-    else if(gasRes <= 5000.0f){
-        gScore = 375.0f;
+    if(baseline <= 0.0f && gasRes > 0.0f){
+        baseline = gasRes; // avoid division by zero; yields ratio 1.0
     }
-    else{
-        gScore = 375 * (1.0f - (gasRes - 5000.0f) / 45000.0f);
+
+    if(baseline > 0.0f && gasRes > 0.0f){
+        // Map gas ratio into a 0-375 score. Ratio <0.25 -> very bad (375). Ratio >=1.5 -> very clean (0).
+        const float ratio = gasRes / baseline;
+        const float ratioClean = 1.5f;
+        const float ratioDirty = 0.25f;
+        if(ratio <= ratioDirty){
+            gScore = 375.0f;
+        } else if(ratio >= ratioClean){
+            gScore = 0.0f;
+        } else {
+            gScore = 375.0f * (ratioClean - ratio) / (ratioClean - ratioDirty);
+        }
+    } else {
+        // Fallback to absolute ohm heuristic if no baseline yet.
+        if(gasRes >= 50000.0f){
+            gScore = 0.0f;
+        }
+        else if(gasRes <= 5000.0f){
+            gScore = 375.0f;
+        }
+        else{
+            gScore = 375.0f * (1.0f - (gasRes - 5000.0f) / 45000.0f);
+        }
     }
 
     //humidity score contribution
@@ -910,7 +1057,8 @@ float BME688Handler::calculateIAQ(float gasRes, float hum){
         hScore = 125.0f * (hum - 42.0f) / 58.0f;
     }
     float rawIAQ = CONSTRAIN_FLOAT(gScore + hScore, 0.0f, 500.0f);
-    float daqi = CONSTRAIN_FLOAT(1.0f + (rawIAQ / 500.0f) * 9.0f, 1.0f, 10.0f);
+    //convert to 1-10 scale
+    float daqi = CONSTRAIN_FLOAT(10.0f - (rawIAQ / 500.0f) * 9.0f, 1.0f, 10.0f);
 
     return daqi;
 }
@@ -1206,18 +1354,18 @@ float estimateCO2EQ(float gas_resistance, float baseline){
 }
 
 const char* getAirQualityString(float iaq){
-    //Base on check-air-quality.service.gov.uk
-    if(iaq >= 1.0f && iaq <= 3.0f){
-        return "Low";
+    //NOTE: inverted scale 
+    if(iaq >= 8.0f){
+        return "Low";          // good air
     }
-    else if(iaq > 3.0f && iaq <= 6.0f){
+    else if(iaq > 5.0f){
         return "Moderate";
     }
-    else if(iaq > 6.0f && iaq <= 9.0f){
-        return "High";
+    else if(iaq > 3.0f){
+        return "High";         // worse air
     }
-    else if(iaq > 9.0f){
-        return "Very High";
+    else if(iaq >= 1.0f){
+        return "Very High";    // very poor air
     }
     return "Unknown";
 }

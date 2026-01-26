@@ -1,12 +1,13 @@
 #include "data_logger.h"
 #include <ctype.h>
 
-static const char LOG_HEADER[] = "timestamp,label,temp1,hum1,pres1,gas1_0,gas1_1,gas1_2,gas1_3,gas1_4,"
-                                 "gas1_5,gas1_6,gas1_7,gas1_8,gas1_9,"
-                                 "temp2,hum2,pres2,gas2_0,gas2_1,gas2_2,gas2_3,gas2_4,"
-                                 "gas2_5,gas2_6,gas2_7,gas2_8,gas2_9,"
+static const char LOG_HEADER[] = "timestamp,label,temp1,hum1,pres1,gas1_0,"
+                                 "temp2,hum2,pres2,gas2_0,"
                                  "delta_temp,delta_hum,delta_pres,delta_gas,"
                                  "pred_class,pred_conf,anomaly_score,iaq";
+
+static const char CALIB_DEBUG_FILE[] = "/calib_debug.txt";
+static const uint32_t CALIB_DEBUG_MIN_INTERVAL_MS = 500;
 
 DataLogger::DataLogger():
     _buffer(nullptr),
@@ -22,6 +23,9 @@ DataLogger::DataLogger():
     _auto_flush_interval(DATA_LOG_FLUSH_INTERVAL_MS),
     _max_file_size(DATA_LOG_MAX_FILE_SIZE),
     _active_label(-1),
+    _calib_debug_count(0),
+    _calib_debug_last_ms(0),
+    _calib_debug_active(false),
     _using_sd(false)
 {}
 
@@ -263,6 +267,67 @@ bool DataLogger::logPrediction(const ml_prediction_t &pred){
     return true;
 }
 
+
+void DataLogger::startCalibDebug(){
+    _calib_debug_count = 0;
+    _calib_debug_last_ms = 0;
+    _calib_debug_active = true;
+}
+
+void DataLogger::logCalibDebug(const String &line){
+    if(!_init || !_calib_debug_active){
+        return;
+    }
+
+    uint32_t now = millis();
+    if(_calib_debug_count > 0 && (now - _calib_debug_last_ms) < CALIB_DEBUG_MIN_INTERVAL_MS){
+        return; //throttle 
+    }
+
+    if(_calib_debug_count >= CALIB_DEBUG_MAX_LINES){
+        return;
+    }
+
+    _calib_debug_buffer[_calib_debug_count++] = line;
+    _calib_debug_last_ms = now;
+}
+
+bool DataLogger::flushCalibDebug(){
+    if(!_init){
+        return false;
+    }
+
+    if(!_calib_debug_active || _calib_debug_count == 0){
+        _calib_debug_active = false;
+        _calib_debug_count = 0;
+        return true;
+    }
+
+    if(!LittleFS.begin()){
+        DEBUG_PRINTLN("[DataLogger] LittleFS mount failed for calib debug");
+        return false;
+    }
+
+    String path = normalisePath(String(CALIB_DEBUG_FILE));
+    File f = LittleFS.open(path, "a");
+    if(!f){
+        DEBUG_PRINTF("[DataLogger] Failed to open calib debug file %s\n", path.c_str());
+        LittleFS.end();
+        return false;
+    }
+
+    for(uint8_t i=0; i<_calib_debug_count; i++){
+        f.println(_calib_debug_buffer[i]);
+    }
+    f.flush();
+    f.close();
+    LittleFS.end();
+
+    _calib_debug_active = false;
+    _calib_debug_count = 0;
+    return true;
+}
+
 //===========================================================================================================
 //buffer
 //===========================================================================================================
@@ -499,10 +564,8 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     checkMean(entry.sensor_data.primary.humidities, entry.sensor_data.primary.validReadings),
     checkMean(entry.sensor_data.primary.pressures, entry.sensor_data.primary.validReadings));
 
-    //gas value
-    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
-        _log_file.printf("%.0f,", entry.sensor_data.primary.gas_resistances[i]);
-    }
+    //gas primary (step 0 only)
+    _log_file.printf("%.0f,", entry.sensor_data.primary.gas_resistances[0]);
 
     //secondary sensor
     _log_file.printf("%.2f,%.2f,%.2f,",
@@ -510,10 +573,8 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     checkMean(entry.sensor_data.secondary.humidities, entry.sensor_data.secondary.validReadings),
     checkMean(entry.sensor_data.secondary.pressures, entry.sensor_data.secondary.validReadings));
 
-    //gas value
-    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
-        _log_file.printf("%.0f,", entry.sensor_data.secondary.gas_resistances[i]);
-    }
+    //gas secondary (step 0 only)
+    _log_file.printf("%.0f,", entry.sensor_data.secondary.gas_resistances[0]);
 
     //deltas
     _log_file.printf("%.2f,%.2f,%.2f,%.0f,",

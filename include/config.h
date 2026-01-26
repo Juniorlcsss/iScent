@@ -68,9 +68,9 @@ static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {300, 
 
 //sampling config
 #define BME688_SAMPLE_RATE 3000
-#define BME688_GAS_BASE_SAMPLES 50
+#define BME688_GAS_BASE_SAMPLES 30
 #define BME688_WARMUP_SAMPLES 10
-#define BME688_STABLE_MS 6000
+#define BME688_STABLE_MS 30000
 
 typedef enum{
     MODE_SLEEP = 0,
@@ -84,6 +84,10 @@ typedef enum{
 #define GAS_RESISTANCE_MAX 1000000.0f //ohms
 #define HUMIDITY_BASELINE 40.0f
 #define TEMPERATURE_BASELINE 24.0f
+
+//corrections
+#define TEMP_CORRECTION_C (-15.0f)
+#define HUM_CORRECTION_PCT (-6.0f)
 
 
 //===========================================================================================================
