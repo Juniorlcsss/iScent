@@ -80,6 +80,10 @@ public:
     void menuSelect();
     uint8_t getSelectedMenuIndex() const;
 
+    //prediction actions
+    void setPredictionSelection(uint8_t idx);
+    uint8_t getPredictionSelection() const;
+
     static const uint8_t MENU_VISIBLE_COUNT =4;
 
     //===========================================================================================================
@@ -113,6 +117,7 @@ private:
     uint8_t _menuSelection;
     uint8_t _menuCount;
     const menu_item_t* _menuItems;
+    uint8_t _predictionSelection;
 
     //buffer
     static const uint8_t GRAPH_BUFFER_SIZE = 64;

@@ -114,24 +114,35 @@ typedef enum{
 
 //tea classification labels
 typedef enum {
-    SCENT_CLASS_UNKNOWN = 0,
-    SCENT_CLASS_TYPE_1,
-    SCENT_CLASS_TYPE_2,
-    SCENT_CLASS_TYPE_3,
-    SCENT_CLASS_TYPE_4,
-    SCENT_CLASS_TYPE_5,
-    SCENT_CLASS_TYPE_6,
-    SCENT_CLASS_COUNT
+    SCENT_CLASS_PURE_CAMOMILE,
+    SCENT_CLASS_THOROUGHLY_MINTED_INFUSION,
+    SCENT_CLASS_BERRY_BURST,
+    SCENT_CLASS_DARJEELING_BLEND,
+    SCENT_CLASS_DECAF_NUTMEG_VANILLA,
+    SCENT_CLASS_EARL_GREY,
+    SCENT_CLASS_ENGLISH_BREAKFAST_TEA,
+    SCENT_CLASS_FRESH_ORANGE,
+    SCENT_CLASS_GARDEN_SELECTION_LEMON,
+    SCENT_CLASS_GREEN_TEA,
+    SCENT_CLASS_RASPBERRY,
+    SCENT_CLASS_SWEET_CHERRY,
+    SCENT_CLASS_COUNT,
+    SCENT_CLASS_UNKNOWN = 255
 } scent_class_t;
 
 static const char* SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
-    "Unknown",
-    "Type 1",
-    "Type 2",
-    "Type 3",
-    "Type 4",
-    "Type 5",
-    "Type 6"
+    "camomile",
+    "thoroughly minted infusion",
+    "berry burst",
+    "darjeeling blend",
+    "decaf nutmeg and vanilla",
+    "earl grey",
+    "english breakfast tea",
+    "fresh orange",
+    "garden selection (lemon)",
+    "green tea",
+    "raspberry",
+    "sweet cherry"
 };
 
 //===========================================================================================================

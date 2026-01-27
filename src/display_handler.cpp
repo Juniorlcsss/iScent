@@ -15,7 +15,8 @@ DisplayHandler::DisplayHandler():
     _menuSelection(0),
     _menuCount(0),
     _graphIdx(0),
-    _menuItems(nullptr)
+    _menuItems(nullptr),
+    _predictionSelection(0)
 
 {
     memset(_graphBuffer, 0, sizeof(_graphBuffer));
@@ -119,6 +120,14 @@ void DisplayHandler::clear(){
 void DisplayHandler::refresh(){
     if(!_ready) return;
     _dsp->display();
+}
+
+void DisplayHandler::setPredictionSelection(uint8_t idx){
+    _predictionSelection = idx % 2;
+}
+
+uint8_t DisplayHandler::getPredictionSelection() const{
+    return _predictionSelection;
 }
 
 void DisplayHandler::showSplashScreen(){
@@ -261,44 +270,41 @@ void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dua
     if(!_ready) return;
 
     clear();
-    drawHeader("Detection");
+    drawHeader("Detect");
+
+    _dsp->setTextSize(1);
 
     //prediction
-    _dsp->setTextSize(1);
-    _dsp->setCursor(0,16);
-    _dsp->print(F("Prediction: "));
+    _dsp->setCursor(0,14);
+    _dsp->print(F("Pred: "));
+    if(pred.valid && pred.predictedClass < SCENT_CLASS_COUNT){
+        const char* name = SCENT_CLASS_NAMES[pred.predictedClass];
+        char label[18];
+        strncpy(label, name, sizeof(label)-1);
+        label[sizeof(label)-1] = '\0';
+        _dsp->print(label);
+    } else if(pred.valid){
+        _dsp->print("Unknown");
+    } else {
+        _dsp->print("Analysing...");
+    }
 
+    //confidence
+    _dsp->setCursor(0,26);
     if(pred.valid){
-        _dsp->setTextSize(1);
-        _dsp->setCursor(0,26);
-        if(pred.predictedClass < SCENT_CLASS_COUNT){
-            _dsp->printf(SCENT_CLASS_NAMES[pred.predictedClass]);
-        }
-        else{
-            _dsp->print("Unknown");
-        }
-        //draw bar
-        drawProgressBar(0,36,100,8,pred.confidence, "Confidence");
-
-        //anomaly
+        _dsp->printf("Conf: %.1f%%", pred.confidence * 100.0f);
         if(pred.isAnomalous){
-            _dsp->setCursor(0,48);
-            _dsp->print("Anomalous!");
+            _dsp->print("An!");//TODO:@
         }
-    }
-    else{
-        _dsp->setCursor(0,26);
-        _dsp->println("Analysing...");
-
-        //display current gas sensor readings
-        _dsp->setCursor(0,48);
-        float gVal=0; const char* gUnit="";
-        formatGasValue(data.primary.gas_resistances[0], gVal, gUnit);
-        _dsp->printf("Gas: %.2f%s", gVal, gUnit);
+    } else {
+        _dsp->print("Conf: ---%");
     }
 
-    //mini sensor bar graph
-    drawBarGraph(102, 14, 24, 48, data.primary.gas_resistances, BME688_NUM_HEATER_STEPS, 500000.0f);
+    // line 3-4: actions
+    _dsp->setCursor(0,38);
+    _dsp->print(_predictionSelection == 0 ? ">Rerun" : " Rerun");
+    _dsp->setCursor(0,48);
+    _dsp->print(_predictionSelection == 1 ? ">Back" : " Back");
 
     refresh();
 

@@ -1,6 +1,10 @@
 #include "ml_inference.h"
 #include <LittleFS.h>
 
+#if EI_CLASSIFIER
+#include "iScent_inferencing.h"
+#endif
+
 MLInference::MLInference():
     _window_index(0),
     _window_size(0),
@@ -71,83 +75,35 @@ bool MLInference::isReady() const{
 //===========================================================================================================
 
 bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data){
-    uint16_t feature_idx=0;
+    uint16_t idx = 0;
 
     //clear
-    memset(_feature_buffer.features,0,sizeof(_feature_buffer.features));
+    memset(_feature_buffer.features, 0, sizeof(_feature_buffer.features));
 
     //*Primary sensor features
-    //gas resistance values
-    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
-        float gas_val = sensor_data.primary.gas_resistances[i];
-        _feature_buffer.features[feature_idx++] = (gas_val >0) ? log10f(gas_val) : 0.0f;
-    }
-
-    _feature_buffer.features[feature_idx++] = sensor_data.primary.temperatures[0] / 100.0f;
-    _feature_buffer.features[feature_idx++] = sensor_data.primary.humidities[0] / 100.0f;
-    _feature_buffer.features[feature_idx++] = sensor_data.primary.pressures[0] / 1100.0f;
-
-    float stats[5]; //
-
-    //stats
-    //temperature
-    computeStats(stats, _windowTempP, _window_size);
-    for(int i=0; i<5; i++){
-        _feature_buffer.features[feature_idx++] = stats[i] /100.0f;
-    }
-    //humidity
-    computeStats(stats, _windowHumP, _window_size);
-    for(int i=0; i<5; i++){
-        _feature_buffer.features[feature_idx++] = stats[i] /100.0f;
-    }
-    //pressure
-    //computeStats(stats, _windowPresP, _window_size);
-    //for(int i=0; i<5; i++){
-    //    _feature_buffer.features[feature_idx++] = stats[i] /1100.0f;
-    //}
-    //gas
-    extractGasFeatures(&_feature_buffer.features[feature_idx], _windowGasP, _window_size);
-    feature_idx += BME688_NUM_HEATER_STEPS * 3;
+    _feature_buffer.features[idx++] = sensor_data.primary.temperatures[0];
+    _feature_buffer.features[idx++] = sensor_data.primary.humidities[0];
+    _feature_buffer.features[idx++] = sensor_data.primary.pressures[0];
+    _feature_buffer.features[idx++] = sensor_data.primary.gas_resistances[0];
 
     //*Secondary sensor features
-    if(sensor_data.secondary.complete){
-        //gas
-        for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
-            float gas_val = sensor_data.secondary.gas_resistances[i];
-            _feature_buffer.features[feature_idx++] = (gas_val >0) ? log10f(gas_val) : 0.0f;
-        }
-
-        _feature_buffer.features[feature_idx++] = sensor_data.secondary.temperatures[0] / 100.0f;
-        _feature_buffer.features[feature_idx++] = sensor_data.secondary.humidities[0] / 100.0f;
-        _feature_buffer.features[feature_idx++] = sensor_data.secondary.pressures[0] / 1100.0f;
-
-        //gas
-        extractGasFeatures(&_feature_buffer.features[feature_idx], _windowGasS, _window_size);
-        feature_idx += BME688_NUM_HEATER_STEPS * 3;
-    }
+    _feature_buffer.features[idx++] = sensor_data.secondary.temperatures[0];
+    _feature_buffer.features[idx++] = sensor_data.secondary.humidities[0];
+    _feature_buffer.features[idx++] = sensor_data.secondary.pressures[0];
+    _feature_buffer.features[idx++] = sensor_data.secondary.gas_resistances[0];
 
     //delta
-    _feature_buffer.features[feature_idx++] = sensor_data.delta_temp / 10.0f;;
-    _feature_buffer.features[feature_idx++] = sensor_data.delta_hum / 100.0f;
-    _feature_buffer.features[feature_idx++] = sensor_data.delta_pres / 10.0f;
-    _feature_buffer.features[feature_idx++] = (sensor_data.delta_gas_avg >0) ? log10f(fabsf(sensor_data.delta_gas_avg)) : 0.0f;
+    _feature_buffer.features[idx++] = sensor_data.delta_temp;
+    _feature_buffer.features[idx++] = sensor_data.delta_hum;
+    _feature_buffer.features[idx++] = sensor_data.delta_pres;
+    _feature_buffer.features[idx++] = sensor_data.delta_gas_avg;
 
-    //gas ratio
-    for(uint8_t i=1; i<BME688_NUM_HEATER_STEPS;i++){
-        float ratio = 0.0f;
-        if(sensor_data.primary.gas_resistances[i-1]){
-            ratio = sensor_data.primary.gas_resistances[i] / sensor_data.primary.gas_resistances[i-1];
-        }
-        _feature_buffer.features[feature_idx++] = ratio;
-    }
-
-    _feature_buffer.featureCount = feature_idx;
+    _feature_buffer.featureCount = idx;
     _feature_buffer.ready = true;
 
-    DEBUG_VERBOSE_PRINTF("[MLInference] Extracted %d features\n", feature_idx);
+    DEBUG_PRINTF("[MLInference] Extracted %d features\n", idx);
 
     return true;
-
 }
 
 
@@ -355,13 +311,13 @@ bool MLInference::runInference(ml_prediction_t &pred){
 
 #if EI_CLASSIFIER
     signal_t signal;
-    signal.total_length = _feature_buffer.featureCount;
+    signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+
+    static float* featurePointer = nullptr;
+    featurePointer = _feature_buffer.features;
+
     signal.get_data = [](size_t offset, size_t length, float* out_ptr) -> int {
-        MLInference* instance = reinterpret_cast<MLInference*>(ei_get_user_data());
-        if(offset + length > instance->_feature_buffer.featureCount){
-            return -1;
-        }
-        memcpy(out_ptr, &instance->_feature_buffer.features[offset], length * sizeof(float));
+        memcpy(out_ptr, featurePointer + offset, length * sizeof(float));
         return 0;
     };
 
@@ -369,9 +325,9 @@ bool MLInference::runInference(ml_prediction_t &pred){
 
     uint32_t start_time = micros();
 
-    EI_IMPULSE_ERROR res = run_classifier_continuous(&signal, &ei_result, false);
+    EI_IMPULSE_ERROR res = run_classifier(&signal, &ei_result, false);
 
-    pred.inference_time_ms = micros() - start_time;
+    pred.inferenceTimeMs = (micros() - start_time) / 1000;
 
     if(res != EI_IMPULSE_OK){
         DEBUG_PRINTLN(F("[MLInference] Inference failed"));
@@ -384,20 +340,23 @@ bool MLInference::runInference(ml_prediction_t &pred){
 
     for(size_t i=0; i< EI_CLASSIFIER_LABEL_COUNT; i++){
         pred.classConfidences[i] = ei_result.classification[i].value;
+        DEBUG_PRINTF("[MLInference] %s: %.2f%%\n",
+            ei_result.classification[i].label,ei_result.classification[i].value * 100.0f);
+
         if(ei_result.classification[i].value > max_confidence){
             max_confidence = ei_result.classification[i].value;
             max_idx = i;
         }
     }
 
-    pred.predictedClass = (scent_class_t)max_idx;
+    pred.predictedClass = getClassFromName(ei_result.classification[max_idx].label);
     pred.confidence = max_confidence;
 
 #if EI_CLASSIFIER_HAS_ANOMALY
     pred.anomalyScore = ei_result.anomaly;
     pred.isAnomalous = (ei_result.anomaly > _anomaly_threshold);
 #endif
-    pred.valid = (pred.confidence >= _confidence_threshold);
+    pred.valid = true;
 
 #else
     //without ei
@@ -584,8 +543,14 @@ void MLInference::printPrediction(const ml_prediction_t &result){
     DEBUG_PRINTF("Inference time: %lu us\n", result.inferenceTimeMs);
     
     DEBUG_PRINTLN(F("All class confidences:"));
-    for (int i = 0; i < SCENT_CLASS_COUNT; i++) {
-        DEBUG_PRINTF("  %s: %.2f%%\n", SCENT_CLASS_NAMES[i],result.classConfidences[i] * 100);
+    #if EI_CLASSIFIER
+    const int labelCount = EI_CLASSIFIER_LABEL_COUNT;
+    #else
+    const int labelCount = SCENT_CLASS_COUNT;
+    #endif
+    for (int i = 0; i < labelCount; i++) {
+        const char* name = (i < SCENT_CLASS_COUNT) ? SCENT_CLASS_NAMES[i] : "Unknown";
+        DEBUG_PRINTF("  %s: %.2f%%\n", name, result.classConfidences[i] * 100);
     }
 }
 
@@ -600,9 +565,14 @@ String MLInference::getPredictionJSON(const ml_prediction_t &result){
     json += "\"anomaly_score\":" + String(result.anomalyScore, 4) + ",";
     json += "\"inference_us\":" + String(result.inferenceTimeMs) + ",";
     json += "\"confidences\":[";
-    for (int i = 0; i < SCENT_CLASS_COUNT; i++) {
+    #if EI_CLASSIFIER
+    const int labelCount = EI_CLASSIFIER_LABEL_COUNT;
+    #else
+    const int labelCount = SCENT_CLASS_COUNT;
+    #endif
+    for (int i = 0; i < labelCount; i++) {
         json += String(result.classConfidences[i], 4);
-        if (i < SCENT_CLASS_COUNT - 1) json += ",";
+        if (i < labelCount - 1) json += ",";
     }
     json += "]}";
     return json;

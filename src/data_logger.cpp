@@ -468,7 +468,7 @@ String DataLogger::generateFilename(){
     const char* baseName = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME + 1 : DATA_LOG_FILENAME;
 
     String suffix;
-    if(_active_label >= SCENT_CLASS_TYPE_1 && _active_label < SCENT_CLASS_COUNT){
+    if(_active_label >= SCENT_CLASS_PURE_CAMOMILE && _active_label < SCENT_CLASS_COUNT){
         suffix = sanitizeLabel(SCENT_CLASS_NAMES[_active_label]);
     }
 

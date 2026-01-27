@@ -5,13 +5,21 @@
 #include "config.h"
 #include "bme688_handler.h"
 
-//edge impulse library check
-#if __has_include("edge-impulse-sdk/classifier/ei_run_classifier.h")
-    #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
-    #define EI_CLASSIFIER 1
+// Detect Edge Impulse assets without pulling in the full implementation here
+#if !defined(EI_CLASSIFIER)
+    #if __has_include("iScent_inferencing.h")
+        #define EI_CLASSIFIER 1
+    #else
+        #define EI_CLASSIFIER 0
+        #warning "Edge Impulse SDK not found, ML inference disabled"
+    #endif
+#endif
+
+#if EI_CLASSIFIER && __has_include("model-parameters/model_metadata.h")
+#include "model-parameters/model_metadata.h"
+static constexpr uint16_t ML_CLASS_COUNT = EI_CLASSIFIER_LABEL_COUNT;
 #else
-    #define EI_CLASSIFIER 0
-    #warning "Edge Impulse SDK not found, ML inference disabled"
+static constexpr uint16_t ML_CLASS_COUNT = SCENT_CLASS_COUNT;
 #endif
 
 
@@ -19,7 +27,7 @@
 typedef struct{
     scent_class_t predictedClass;
     float confidence;
-    float classConfidences[SCENT_CLASS_COUNT];
+    float classConfidences[ML_CLASS_COUNT];
     float anomalyScore;
     bool isAnomalous;
     uint32_t inferenceTimeMs;

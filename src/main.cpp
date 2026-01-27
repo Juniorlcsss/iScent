@@ -40,9 +40,10 @@ ml_prediction_t currentPrediction;
 bool loggingActive = false;
 bool continuousInference = true;
 bool collectingLabeled = false;
-int16_t currentLabelSelection = SCENT_CLASS_TYPE_1;
+int16_t currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
 uint32_t lastLoggingRetryMs = 0;
 const uint32_t LOGGING_RETRY_INTERVAL_MS = 3000;
+uint8_t predictionSelection = 0;
 
 //===========================================================================================================
 //functions
@@ -111,7 +112,7 @@ static char settingsLabelWipe[] = "Wipe SD Card";
 static char settingsLabelBack[] = "Back";
 
 //data collection labels
-static char collectLabelSelect[24] = "Label: Type 1"; //TODO: Change from 'Type 1' to whatever the actual names are going to be
+static char collectLabelSelect[24] = "Label: pure camomile";
 static char collectLabelToggle[24] = "Start Collect";
 static char collectLabelBack[] = "Back";
 
@@ -432,6 +433,12 @@ void handleStateMachine(){
                     lastSampleTime = millis();
                 }
             }
+
+            if(millis() - lastInferenceTime >= ML_INFERENCE_INTERVAL_MS){
+                performInference();
+                lastInferenceTime = millis();
+                enterState(STATE_IDLE);
+            }
             break;
 
         case STATE_SLEEP:
@@ -715,6 +722,34 @@ void handleButtons(){
         return;
     }
 
+    //prediction screen nav
+    if(display.getMode() == DISPLAY_MODE_PREDICTION){
+        if(buttons.wasPressed(BUTTON_DOWN)){
+            predictionSelection = (predictionSelection + 1) % 2;
+            display.setPredictionSelection(predictionSelection);
+            updateDisplay();
+            return;
+        }
+
+        if(buttons.wasPressed(BUTTON_SELECT) || buttons.wasLongPressed(BUTTON_SELECT)){
+            if(predictionSelection == 0){
+                //show analysing state before rerun
+                currentPrediction.valid = false;
+                currentPrediction.confidence = 0.0f;
+                currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
+                display.showPredictionScreen(currentPrediction, currentSensorData);
+                display.refresh();
+                performInference();
+                updateDisplay();
+            } else {
+                display.setMode(DISPLAY_MODE_MENU);
+                display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+                updateDisplay();
+            }
+            return;
+        }
+    }
+
     //outside menus: only allow long-press select to return to menu per controls
     if(buttons.wasPressed(BUTTON_DOWN)){
         return;
@@ -891,6 +926,8 @@ void menuActionShowSensorData(){
 }
 
 void menuActionShowPrediction(){
+    predictionSelection = 0;
+    display.setPredictionSelection(predictionSelection);
     display.setMode(DISPLAY_MODE_PREDICTION);
 }
 
@@ -1019,8 +1056,8 @@ void settingsActionBackToMain(){
 //===========================================================================================================
 
 void refreshDataCollectionMenu(){
-    if(currentLabelSelection < SCENT_CLASS_TYPE_1 || currentLabelSelection >= SCENT_CLASS_COUNT){
-        currentLabelSelection = SCENT_CLASS_TYPE_1;
+    if(currentLabelSelection < SCENT_CLASS_PURE_CAMOMILE || currentLabelSelection >= SCENT_CLASS_COUNT){
+        currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
     }
 
     const char* labelName = (currentLabelSelection >=0 && currentLabelSelection < SCENT_CLASS_COUNT) ? SCENT_CLASS_NAMES[currentLabelSelection] : "Unknown";
@@ -1032,7 +1069,7 @@ void refreshDataCollectionMenu(){
 void dataCollectActionCycleLabel(){
     currentLabelSelection++;
     if(currentLabelSelection >= SCENT_CLASS_COUNT || currentLabelSelection == SCENT_CLASS_UNKNOWN){
-        currentLabelSelection = SCENT_CLASS_TYPE_1;
+        currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
     }
     refreshDataCollectionMenu();
 }
@@ -1047,8 +1084,8 @@ void dataCollectActionToggle(){
         collectingLabeled = false;
     } 
     else {
-        if(currentLabelSelection < SCENT_CLASS_TYPE_1 || currentLabelSelection >= SCENT_CLASS_COUNT){
-            currentLabelSelection = SCENT_CLASS_TYPE_1;
+        if(currentLabelSelection < SCENT_CLASS_PURE_CAMOMILE || currentLabelSelection >= SCENT_CLASS_COUNT){
+            currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
         }
         logger.setActiveLabel(currentLabelSelection);
         if(!logger.isLogging()){
