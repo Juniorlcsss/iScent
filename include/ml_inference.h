@@ -23,6 +23,15 @@ static constexpr uint16_t ML_CLASS_COUNT = SCENT_CLASS_COUNT;
 #endif
 
 
+//
+typedef struct{
+    uint16_t correct;
+    uint16_t total;
+    float accuracy;
+    uint16_t confusionMatrix[ML_CLASS_COUNT][ML_CLASS_COUNT];
+    float accuracy;
+}ml_metrics_t;
+
 //prediction struct
 typedef struct{
     scent_class_t predictedClass;
