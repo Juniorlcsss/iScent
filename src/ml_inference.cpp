@@ -5,6 +5,10 @@
 #include "iScent_inferencing.h"
 #endif
 
+#include "model headers/dt_model_header.h"
+#include "model headers/knn_model_header.h"
+#include "model headers/rf_model_header.h"
+
 MLInference::MLInference():
     _window_index(0),
     _window_size(0),
@@ -15,9 +19,12 @@ MLInference::MLInference():
     _current_label(SCENT_CLASS_UNKNOWN),
     _total_inferences(0),
     _total_inference_time_ms(0),
+    _active_model(ML_MODEL_EDGE_IMPULSE),
+    _model_names{"Edge Impulse", "Decision Tree", "KNN", "Random Forest"},
     _training_samples(nullptr),
     _training_sample_count(0)
 {
+    memset(_model_available, 0, sizeof(_model_available));
     memset(&_feature_buffer,0,sizeof(_feature_buffer));
     memset(_windowTempP,0,sizeof(_windowTempP));
     memset(_windowHumP,0,sizeof(_windowHumP));
@@ -41,6 +48,11 @@ MLInference::~MLInference(){
 bool MLInference::begin(){
     DEBUG_PRINTLN(F("[MLInference] Initializing ML Inference module"));
 
+    _model_available[ML_MODEL_EDGE_IMPULSE] = (EI_CLASSIFIER != 0);
+    _model_available[ML_MODEL_DECISION_TREE] = true;
+    _model_available[ML_MODEL_KNN] = true;
+    _model_available[ML_MODEL_RANDOM_FOREST] = true;
+
 #if EI_CLASSIFIER
     //init edge impulse model info
     DEBUG_PRINTF("[MLInference] Edge Impulse model info:\n");
@@ -61,6 +73,8 @@ bool MLInference::begin(){
     DEBUG_PRINTLN(F("[MLInference] Data collection mode only"));
     _init = true;
 #endif
+
+    setActiveModel(_active_model);
 
     clearFeatureBuffer();
     return _init;
@@ -183,6 +197,44 @@ scent_class_t MLInference::getClassFromName(const char* name) const{
     }
     return SCENT_CLASS_UNKNOWN;
 }   
+
+void MLInference::setActiveModel(ml_model_source_t model){
+    if(model >= ML_MODEL_COUNT){
+        model = ML_MODEL_EDGE_IMPULSE;
+    }
+
+    if(_model_available[model]){
+        _active_model = model;
+        return;
+    }
+
+    for(uint8_t i=1; i<=ML_MODEL_COUNT; i++){
+        ml_model_source_t candidate = (ml_model_source_t)((model + i) % ML_MODEL_COUNT);
+        if(_model_available[candidate]){
+            _active_model = candidate;
+            return;
+        }
+    }
+}
+
+void MLInference::nextModel(){
+    setActiveModel((ml_model_source_t)((_active_model + 1) % ML_MODEL_COUNT));
+}
+
+ml_model_source_t MLInference::getActiveModel() const{
+    return _active_model;
+}
+
+const char* MLInference::getActiveModelName() const{
+    return _model_names[_active_model];
+}
+
+bool MLInference::isModelAvailable(ml_model_source_t model) const{
+    if(model >= ML_MODEL_COUNT){
+        return false;
+    }
+    return _model_available[model];
+}
 
 
 void MLInference::extractGasFeatures(float* output, const float window[][BME688_NUM_HEATER_STEPS], uint16_t samples){
@@ -309,67 +361,124 @@ bool MLInference::runInference(ml_prediction_t &pred){
         return false;
     }
 
-#if EI_CLASSIFIER
-    signal_t signal;
-    signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
-
-    static float* featurePointer = nullptr;
-    featurePointer = _feature_buffer.features;
-
-    signal.get_data = [](size_t offset, size_t length, float* out_ptr) -> int {
-        memcpy(out_ptr, featurePointer + offset, length * sizeof(float));
-        return 0;
-    };
-
-    ei_impulse_result_t ei_result = {0};
-
-    uint32_t start_time = micros();
-
-    EI_IMPULSE_ERROR res = run_classifier(&signal, &ei_result, false);
-
-    pred.inferenceTimeMs = (micros() - start_time) / 1000;
-
-    if(res != EI_IMPULSE_OK){
-        DEBUG_PRINTLN(F("[MLInference] Inference failed"));
+    if(!_model_available[_active_model]){
+        DEBUG_PRINTLN(F("[MLInference] Selected model not available"));
         return false;
     }
 
-    //get results
-    float max_confidence = 0.0f;
-    uint8_t max_idx = 0;
+    uint32_t start_time = micros();
 
-    for(size_t i=0; i< EI_CLASSIFIER_LABEL_COUNT; i++){
-        pred.classConfidences[i] = ei_result.classification[i].value;
-        DEBUG_PRINTF("[MLInference] %s: %.2f%%\n",
-            ei_result.classification[i].label,ei_result.classification[i].value * 100.0f);
+    switch(_active_model){
+        case ML_MODEL_EDGE_IMPULSE: {
+#if EI_CLASSIFIER
+            signal_t signal;
+            signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
 
-        if(ei_result.classification[i].value > max_confidence){
-            max_confidence = ei_result.classification[i].value;
-            max_idx = i;
-        }
-    }
+            static float* featurePointer = nullptr;
+            featurePointer = _feature_buffer.features;
 
-    pred.predictedClass = getClassFromName(ei_result.classification[max_idx].label);
-    pred.confidence = max_confidence;
+            signal.get_data = [](size_t offset, size_t length, float* out_ptr) -> 
+            int {
+                memcpy(out_ptr, featurePointer + offset, length * sizeof(float));
+                return 0;
+            };
+
+            ei_impulse_result_t ei_result = {0};
+            EI_IMPULSE_ERROR res = run_classifier(&signal, &ei_result, false);
+
+            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+
+            if(res != EI_IMPULSE_OK){
+                DEBUG_PRINTLN(F("[MLInference] Inference failed"));
+                return false;
+            }
+
+            float max_confidence = 0.0f;
+            uint8_t max_idx = 0;
+
+            for(size_t i=0; i< EI_CLASSIFIER_LABEL_COUNT; i++){
+                pred.classConfidences[i] = ei_result.classification[i].value;
+                DEBUG_PRINTF("[MLInference] %s: %.2f%%\n",
+                    ei_result.classification[i].label,ei_result.classification[i].value * 100.0f);
+
+                if(ei_result.classification[i].value > max_confidence){
+                    max_confidence = ei_result.classification[i].value;
+                    max_idx = i;
+                }
+            }
+
+            pred.predictedClass = getClassFromName(ei_result.classification[max_idx].label);
+            pred.confidence = max_confidence;
 
 #if EI_CLASSIFIER_HAS_ANOMALY
-    pred.anomalyScore = ei_result.anomaly;
-    pred.isAnomalous = (ei_result.anomaly > _anomaly_threshold);
+            pred.anomalyScore = ei_result.anomaly;
+            pred.isAnomalous = (ei_result.anomaly > _anomaly_threshold);
 #endif
-    pred.valid = true;
-
+            pred.valid = true;
 #else
-    //without ei
-    DEBUG_PRINTLN(F("[MLInference] Edge Impulse SDK not available, inference not possible"));
-    pred.predictedClass = SCENT_CLASS_UNKNOWN;
-    pred.confidence = 0.0f;
-    pred.valid = false;
-    pred.inferenceTimeMs = 0;
-
+            DEBUG_PRINTLN(F("[MLInference] Edge Impulse model not available"));
+            pred.valid = false;
 #endif
+            break;
+        }
 
-    _total_inferences++;
-    _total_inference_time_ms += pred.inferenceTimeMs;
+        case ML_MODEL_DECISION_TREE: {
+            uint8_t cls = dt_predict(_feature_buffer.features);
+            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+            pred.predictedClass = (scent_class_t)cls;
+            pred.confidence = 1.0f;
+            memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+            if(pred.predictedClass < ML_CLASS_COUNT){
+                pred.classConfidences[pred.predictedClass] = 1.0f;
+            }
+            pred.isAnomalous = false;
+            pred.anomalyScore = 0.0f;
+            pred.valid = true;
+            break;
+        }
+
+        case ML_MODEL_KNN: {
+            float confidence = 0.0f;
+            uint8_t cls = knn_predict_with_confidence(_feature_buffer.features, &confidence);
+            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+            pred.predictedClass = (scent_class_t)cls;
+            pred.confidence = confidence;
+            memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+            if(pred.predictedClass < ML_CLASS_COUNT){
+                pred.classConfidences[pred.predictedClass] = confidence;
+            }
+            pred.isAnomalous = false;
+            pred.anomalyScore = 0.0f;
+            pred.valid = true;
+            break;
+        }
+
+        case ML_MODEL_RANDOM_FOREST: {
+            float confidence = 0.0f;
+            uint8_t cls = rf_predict_with_confidence(_feature_buffer.features, &confidence);
+            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+            pred.predictedClass = (scent_class_t)cls;
+            pred.confidence = confidence;
+            memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+            if(pred.predictedClass < ML_CLASS_COUNT){
+                pred.classConfidences[pred.predictedClass] = confidence;
+            }
+            pred.isAnomalous = false;
+            pred.anomalyScore = 0.0f;
+            pred.valid = true;
+            break;
+        }
+
+        default:
+            pred.valid = false;
+            DEBUG_PRINTLN(F("[MLInference] Unknown model selection"));
+            break;
+    }
+
+    if(pred.valid){
+        _total_inferences++;
+        _total_inference_time_ms += pred.inferenceTimeMs;
+    }
     return pred.valid;
 }
 
@@ -529,6 +638,7 @@ void MLInference::printModelInfo(){
 #else
     DEBUG_PRINTLN(F("Model: None (Edge Impulse SDK not available)"));
 #endif
+    DEBUG_PRINTF("Active model: %s\n", getActiveModelName());
     DEBUG_PRINTF("Confidence threshold: %.2f\n", _confidence_threshold);
     DEBUG_PRINTF("Anomaly threshold: %.2f\n", _anomaly_threshold);
     DEBUG_PRINTF("Total inferences: %lu\n", _total_inferences);
@@ -536,6 +646,7 @@ void MLInference::printModelInfo(){
 
 void MLInference::printPrediction(const ml_prediction_t &result){
     DEBUG_PRINTLN(F("=== Prediction Result ==="));
+    DEBUG_PRINTF("Model: %s\n", getActiveModelName());
     DEBUG_PRINTF("Class: %s\n", getClassName(result.predictedClass));
     DEBUG_PRINTF("Confidence: %.2f%%\n", result.confidence * 100);
     DEBUG_PRINTF("Valid: %s\n", result.valid ? "Yes" : "No");
@@ -557,6 +668,7 @@ void MLInference::printPrediction(const ml_prediction_t &result){
 String MLInference::getPredictionJSON(const ml_prediction_t &result){
     String json = "{";
     json += "\"timestamp\":" + String(result.timestamp) + ",";
+    json += "\"model\":\"" + String(getActiveModelName()) + "\",";
     json += "\"class\":\"" + String(getClassName(result.predictedClass)) + "\",";
     json += "\"class_id\":" + String(result.predictedClass) + ",";
     json += "\"confidence\":" + String(result.confidence, 4) + ",";

@@ -46,7 +46,7 @@ public:
     void showSplashScreen();
     void showStatusScreen(system_state_t state, error_code_t error);
     void showSensorDataScreen(const dual_sensor_data_t &data);
-    void showPredictionScreen(const ml_prediction_t &prediction, const dual_sensor_data_t &data);
+    void showPredictionScreen(const ml_prediction_t &prediction, const dual_sensor_data_t &data, const char* modelName);
     void showGraphScreen(const float *data, uint16_t length, const char* title);
     void showSettingsScreen();
     void showLoggingScreen(uint32_t samples, bool active);

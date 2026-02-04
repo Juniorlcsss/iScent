@@ -43,6 +43,14 @@ typedef struct{
     bool valid;
 } ml_prediction_t;
 
+typedef enum {
+    ML_MODEL_EDGE_IMPULSE = 0,
+    ML_MODEL_DECISION_TREE,
+    ML_MODEL_KNN,
+    ML_MODEL_RANDOM_FOREST,
+    ML_MODEL_COUNT
+} ml_model_source_t;
+
 //feature buffer struct
 typedef struct{
     float features[TOTAL_ML_FEATURES];
@@ -84,6 +92,15 @@ public:
     //===========================================================================================================
     bool runInference(ml_prediction_t &pred);//
     bool runInferenceOnData(const dual_sensor_data_t &data, ml_prediction_t &pred);//
+
+    //===========================================================================================================
+    //model selection
+    //===========================================================================================================
+    void setActiveModel(ml_model_source_t model);
+    void nextModel();
+    ml_model_source_t getActiveModel() const;
+    const char* getActiveModelName() const;
+    bool isModelAvailable(ml_model_source_t model) const;
 
     //===========================================================================================================
     //data collection
@@ -150,12 +167,17 @@ private:
     uint32_t _total_inferences;
     uint64_t _total_inference_time_ms;
 
+    //model selection
+    ml_model_source_t _active_model;
+    bool _model_available[ML_MODEL_COUNT];
+    const char* const _model_names[ML_MODEL_COUNT];
+
     //data collection
     static const uint16_t MAX_TRAINING_SAMPLES = 1000;
     ml_training_sample_t *_training_samples;
     uint16_t _training_sample_count;
 
-        //===========================================================================================================
+    //===========================================================================================================
     //methods
     //===========================================================================================================
     void normaliseFeatures();

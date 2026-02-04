@@ -620,7 +620,8 @@ bool performSampling(){
 
 void performInference(){
     if(ml.runInference(currentPrediction)){     
-        DEBUG_PRINTF("[Inference] Prediction: %s (%.2f), Anomaly: %.2f\n", 
+        DEBUG_PRINTF("[Inference] Model=%s Prediction: %s (%.2f), Anomaly: %.2f\n", 
+            ml.getActiveModelName(),
             ml.getClassName(currentPrediction.predictedClass),
             currentPrediction.confidence * 100.0f,
             currentPrediction.anomalyScore
@@ -725,26 +726,40 @@ void handleButtons(){
     //prediction screen nav
     if(display.getMode() == DISPLAY_MODE_PREDICTION){
         if(buttons.wasPressed(BUTTON_DOWN)){
-            predictionSelection = (predictionSelection + 1) % 2;
+            predictionSelection = (predictionSelection + 1) % 3;
             display.setPredictionSelection(predictionSelection);
             updateDisplay();
             return;
         }
 
         if(buttons.wasPressed(BUTTON_SELECT) || buttons.wasLongPressed(BUTTON_SELECT)){
-            if(predictionSelection == 0){
-                //show analysing state before rerun
-                currentPrediction.valid = false;
-                currentPrediction.confidence = 0.0f;
-                currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
-                display.showPredictionScreen(currentPrediction, currentSensorData);
-                display.refresh();
-                performInference();
-                updateDisplay();
-            } else {
-                display.setMode(DISPLAY_MODE_MENU);
-                display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
-                updateDisplay();
+            switch(predictionSelection){
+                case 0:{
+                    currentPrediction.valid = false;
+                    currentPrediction.confidence = 0.0f;
+                    currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
+                    display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
+                    display.refresh();
+                    performInference();
+                    updateDisplay();
+                    break;
+                }
+                case 1:{
+                    ml.nextModel();
+                    currentPrediction.valid = false;
+                    currentPrediction.confidence = 0.0f;
+                    currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
+                    display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
+                    display.refresh();
+                    performInference();
+                    updateDisplay();
+                    break;
+                }
+                default:
+                    display.setMode(DISPLAY_MODE_MENU);
+                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
+                    updateDisplay();
+                    break;
             }
             return;
         }
@@ -877,7 +892,7 @@ void updateDisplay(){
             break;
 
         case DISPLAY_MODE_PREDICTION:
-            display.showPredictionScreen(currentPrediction, currentSensorData);
+            display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
             break;
 
         case DISPLAY_MODE_CALIBRATION:

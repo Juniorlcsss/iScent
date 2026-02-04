@@ -123,7 +123,7 @@ void DisplayHandler::refresh(){
 }
 
 void DisplayHandler::setPredictionSelection(uint8_t idx){
-    _predictionSelection = idx % 2;
+    _predictionSelection = idx % 3;
 }
 
 uint8_t DisplayHandler::getPredictionSelection() const{
@@ -266,7 +266,7 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
 
 }
 
-void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dual_sensor_data_t &data){
+void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dual_sensor_data_t &data, const char* modelName){
     if(!_ready) return;
 
     clear();
@@ -294,17 +294,31 @@ void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dua
     if(pred.valid){
         _dsp->printf("Conf: %.1f%%", pred.confidence * 100.0f);
         if(pred.isAnomalous){
-            _dsp->print("An!");//TODO:@
+            _dsp->print("An!");
         }
     } else {
         _dsp->print("Conf: ---%");
     }
 
-    // line 3-4: actions
+    //actions
     _dsp->setCursor(0,38);
     _dsp->print(_predictionSelection == 0 ? ">Rerun" : " Rerun");
+
+    char modelBuf[18];
+    if(modelName == nullptr){
+        strncpy(modelBuf, "Unknown", sizeof(modelBuf) - 1);
+        modelBuf[sizeof(modelBuf) - 1] = '\0';
+    } else {
+        strncpy(modelBuf, modelName, sizeof(modelBuf) - 1);
+        modelBuf[sizeof(modelBuf) - 1] = '\0';
+    }
+
     _dsp->setCursor(0,48);
-    _dsp->print(_predictionSelection == 1 ? ">Back" : " Back");
+    _dsp->print(_predictionSelection == 1 ? ">Model: " : " Model: ");
+    _dsp->print(modelBuf);
+
+    _dsp->setCursor(0,56);
+    _dsp->print(_predictionSelection == 2 ? ">Back" : " Back");
 
     refresh();
 
