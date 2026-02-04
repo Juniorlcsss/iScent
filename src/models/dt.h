@@ -2,18 +2,32 @@
 #define DECISION_TREE_MODEL_H
 
 #include <stdint.h>
-#include "config.h"
-#include "ml_inference.h"
 #include <vector>
+#include <fstream>
 
-struct Node{
+//platform specific
+#ifdef ARDUINO
+    #include "config.h"
+    #include "ml_inference.h"
+#else
+    #include "csv_loader.h"
+    typedef csv_training_sample_t ml_training_sample_t;
+    typedef csv_metrics_t ml_metrics_t;
+#endif
+
+
+#ifndef DTNode_STRUCT_DEFINED
+#define DTNode_STRUCT_DEFINED
+struct DTNode{
     scent_class_t label;
     int featureIndex;
     float threshold;
-    Node* left;
-    Node* right;
-    Node() : label(SCENT_CLASS_UNKNOWN), featureIndex(-1), threshold(0.0f), left(nullptr), right(nullptr) {}
+    DTNode* left;
+    DTNode* right;
+    DTNode() : label(SCENT_CLASS_UNKNOWN), featureIndex(-1), threshold(0.0f), left(nullptr), right(nullptr) {}
 };
+#endif
+
 
 class DecisionTree{
 public:
@@ -26,21 +40,24 @@ public:
 
     //tree info
     void getStats();
-    uint16_t getNodeCount() const {return nodeCount;}
+    uint16_t getDTNodeCount() const {return DTNodeCount;}
     uint16_t getDepth() const {return depth;}
     uint16_t getLeafCount() const {return leafCount;}
     void printTree(int maxDepth=5) const;
 
     scent_class_t predict(const float* features) const;
+
+    bool saveModel(const char* file) const;
+    bool loadModel(const char* file);
 private:
-    const Node* _root;
+    const DTNode* _root;
     bool _ownedRoot;
     uint16_t _featureCount;
-    uint16_t nodeCount;
+    uint16_t DTNodeCount;
     uint16_t depth;
     uint16_t leafCount;
 
-    Node* buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples, uint8_t depth, uint8_t maxDepth, uint8_t minSampleSplit);
+    DTNode* buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples, uint8_t depth, uint8_t maxDepth, uint8_t minSampleSplit);
 
     void findBestSplit(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples, int &bestFeatureIndex, float &bestThreshold, float &bestGini);
 
@@ -48,10 +65,13 @@ private:
 
     scent_class_t getMajorityClass(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples);
 
-    void deleteTree(Node* node);
+    void deleteTree(DTNode* DTNode);
 
-    void printNode(const Node* node, int depth, int maxDepth) const;
-    void countNodes(const Node* node, uint16_t &count, uint16_t depth, uint16_t &maxDepth, uint16_t &leafCount)const;
+    void printDTNode(const DTNode* DTNode, int depth, int maxDepth) const;
+    void countDTNodes(const DTNode* DTNode, uint16_t &count, uint16_t depth, uint16_t &maxDepth, uint16_t &leafCount)const;
+
+    void saveTreeDTNode(std::ofstream &file, const DTNode* DTNode) const;
+    DTNode* loadTreeDTNode(std::ifstream &file);
 };
 
 #endif

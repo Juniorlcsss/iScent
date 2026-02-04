@@ -2,10 +2,19 @@
 #define KNN_MODEL_H
 
 #include <stdint.h>
-#include "config.h"
-#include "ml_inference.h"
 #include <math.h>
 #include <stddef.h>
+
+#ifdef ARDUINO
+    #include "config.h"
+    #include "ml_inference.h"
+    #define KNN_FEATURE_COUNT TOTAL_ML_FEATURES
+#else
+    #include "csv_loader.h"
+    typedef csv_training_sample_t ml_training_sample_t;
+    typedef csv_metrics_t ml_metrics_t;
+    #define KNN_FEATURE_COUNT CSV_FEATURE_COUNT
+#endif
 
 class KNN{
 public:
@@ -20,7 +29,8 @@ public:
     void setK(uint8_t k){ _k = k; }
     uint8_t getK() const { return _k; }
     
-    
+    bool saveModel(const char* filename) const;
+    bool loadModel(const char* filename);
 private:
     const ml_training_sample_t *_samples;
     uint16_t _sample_count;

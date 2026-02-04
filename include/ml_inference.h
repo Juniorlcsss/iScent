@@ -29,7 +29,6 @@ typedef struct{
     uint16_t total;
     float accuracy;
     uint16_t confusionMatrix[ML_CLASS_COUNT][ML_CLASS_COUNT];
-    float accuracy;
 }ml_metrics_t;
 
 //prediction struct

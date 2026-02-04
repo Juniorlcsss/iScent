@@ -3,14 +3,18 @@
 #include <set>
 #include <map>
 #include <algorithm>
+#include <fstream>
+
+static const uint32_t DT_MAGIC = 0x44544D4C;
+static const uint16_t DT_VERSION = 1;
 
 DecisionTree::~DecisionTree(){
     if(_ownedRoot && _root){
-        deleteTree(const_cast<Node*>(_root));
+        deleteTree(const_cast<DTNode*>(_root));
     }
 }
 
-void DecisionTree::deleteTree(Node* n){
+void DecisionTree::deleteTree(DTNode* n){
     if(n){
         deleteTree(n->left);
         deleteTree(n->right);
@@ -18,9 +22,104 @@ void DecisionTree::deleteTree(Node* n){
     }
 }
 
+bool DecisionTree::saveModel(const char* filename)const{
+    std::ofstream file(filename, std::ios::binary);
+    if(!file.is_open()){
+        return false;
+    }
+
+    file.write(reinterpret_cast<const char*>(&DT_MAGIC), sizeof(DT_MAGIC));
+    file.write(reinterpret_cast<const char*>(&DT_VERSION), sizeof(DT_VERSION));
+    file.write(reinterpret_cast<const char*>(&_featureCount), sizeof(_featureCount));
+
+    uint8_t maxDepth = depth;
+    uint8_t minSamples = 5;
+
+    file.write(reinterpret_cast<const char*>(&maxDepth), sizeof(maxDepth));
+    file.write(reinterpret_cast<const char*>(&minSamples), sizeof(minSamples));
+
+    saveTreeDTNode(file, _root);
+
+    file.close();
+    std::cout << "Decision Tree model saved to " << filename << std::endl;
+    return true;
+}
+
+void DecisionTree::saveTreeDTNode(std::ofstream &file, const DTNode* DTNode) const {
+    uint8_t exists = (DTNode != nullptr) ? 1 : 0;
+    file.write(reinterpret_cast<const char*>(&exists), sizeof(exists));
+
+    if(!DTNode){
+        return;
+    }
+
+    uint8_t label = static_cast<uint8_t>(DTNode->label);
+    file.write(reinterpret_cast<const char*>(&label), sizeof(label));
+    file.write(reinterpret_cast<const char*>(&DTNode->featureIndex), sizeof(DTNode->featureIndex));
+    file.write(reinterpret_cast<const char*>(&DTNode->threshold), sizeof(DTNode->threshold));
+
+    saveTreeDTNode(file, DTNode->left);
+    saveTreeDTNode(file, DTNode->right);
+}
+
+bool DecisionTree::loadModel(const char* filename){
+    std::ifstream file(filename, std::ios::binary);
+    if(!file.is_open()){
+        return false;
+    }
+
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+    if(magic != DT_MAGIC || version != DT_VERSION){
+        std::cerr << "Invalid Decision Tree model file." << std::endl;
+        return false;
+    }
+
+    if(_ownedRoot && _root){
+        deleteTree(const_cast<DTNode*>(_root));
+    }
+
+    file.read(reinterpret_cast<char*>(&_featureCount), sizeof(_featureCount));
+
+    uint8_t maxDepth = 0;
+    uint8_t minSamples = 0;
+
+    file.read(reinterpret_cast<char*>(&maxDepth), sizeof(maxDepth));
+    file.read(reinterpret_cast<char*>(&minSamples), sizeof(minSamples));
+
+    _root = loadTreeDTNode(file);
+    _ownedRoot = true;
+
+    file.close();
+    std::cout << "Decision Tree model loaded from " << filename << std::endl;
+    return true;
+}
+
+DTNode* DecisionTree::loadTreeDTNode(std::ifstream &file){
+    uint8_t exists = 0;
+    file.read(reinterpret_cast<char*>(&exists), sizeof(exists));
+    if(!exists){
+        return nullptr;
+    }
+
+    DTNode* node = new DTNode();
+    uint8_t label = 0;
+    file.read(reinterpret_cast<char*>(&label), sizeof(label));
+    node->label = static_cast<scent_class_t>(label);
+    file.read(reinterpret_cast<char*>(&node->featureIndex), sizeof(node->featureIndex));
+    file.read(reinterpret_cast<char*>(&node->threshold), sizeof(node->threshold));
+
+    node->left = loadTreeDTNode(file);
+    node->right = loadTreeDTNode(file);
+    return node;
+}
+
 void DecisionTree::train(const ml_training_sample_t *samples, uint16_t count, uint16_t featureCount, uint8_t maxDepth, uint8_t minSamples){
     if(_ownedRoot && _root){
-        deleteTree(const_cast<Node*>(_root));
+        deleteTree(const_cast<DTNode*>(_root));
     }
 
     _featureCount=  featureCount;
@@ -32,8 +131,8 @@ void DecisionTree::train(const ml_training_sample_t *samples, uint16_t count, ui
     _ownedRoot = true;
 }
 
-Node* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples, uint8_t depth, uint8_t maxDepth, uint8_t minSampleSplit){
-    Node* node = new Node();
+DTNode* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples, uint8_t depth, uint8_t maxDepth, uint8_t minSampleSplit){
+    DTNode* node = new DTNode();
 
     if(sampleIndicies.size()==0){
         node->label = SCENT_CLASS_UNKNOWN;
@@ -63,7 +162,6 @@ Node* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, const
 
     node->featureIndex = bestFeatureIndex;
     node->threshold = bestThreshold;
-
     std::vector<uint16_t> leftIdx, rightIdx;
 
     for(auto idx : sampleIndicies){
@@ -192,62 +290,62 @@ ml_metrics_t DecisionTree::evaluate(const ml_training_sample_t* samples, uint16_
 
 void DecisionTree::printTree(int maxDepth) const{
     if(_root){
-        printNode(_root,0,maxDepth);
+        printDTNode(_root,0,maxDepth);
     }
 }
 
-void DecisionTree::printNode(const Node* node, int depth, int maxDepth) const{
-    if(!node || depth > maxDepth){
+void DecisionTree::printDTNode(const DTNode* DTNode, int depth, int maxDepth) const{
+    if(!DTNode || depth > maxDepth){
         return;
     }
     for(int i=0; i<depth; i++){
         std::cout << "  ";
     }
-    if(node->featureIndex < 0 ){
-        std::cout << "Leaf: Class=" << (int)node->label << std::endl;
+    if(DTNode->featureIndex < 0 ){
+        std::cout << "Leaf: Class=" << (int)DTNode->label << std::endl;
     }
     else{
-        std::cout << "Node: Feature[" << node->featureIndex << "] < " << node->threshold << std::endl;
-        printNode(node->left, depth+1, maxDepth);
-        printNode(node->right, depth+1, maxDepth);
+        std::cout << "DTNode: Feature[" << DTNode->featureIndex << "] < " << DTNode->threshold << std::endl;
+        printDTNode(DTNode->left, depth+1, maxDepth);
+        printDTNode(DTNode->right, depth+1, maxDepth);
     }
 
 }
 
-void DecisionTree::countNodes(const Node* node, uint16_t &count, uint16_t depth, uint16_t &maxDepth, uint16_t &leafCount)const{
-    if(!node){
+void DecisionTree::countDTNodes(const DTNode* DTNode, uint16_t &count, uint16_t depth, uint16_t &maxDepth, uint16_t &leafCount)const{
+    if(!DTNode){
         return;
     }
     count++;
     if(depth > maxDepth){
         maxDepth = depth;
     }
-    if(node->featureIndex < 0){
+    if(DTNode->featureIndex < 0){
         leafCount++;
     }
     else{
-        countNodes(node->left, count, depth+1, maxDepth, leafCount);
-        countNodes(node->right, count, depth+1, maxDepth, leafCount);
+        countDTNodes(DTNode->left, count, depth+1, maxDepth, leafCount);
+        countDTNodes(DTNode->right, count, depth+1, maxDepth, leafCount);
     }
 }
 
 void DecisionTree::getStats(){
-    nodeCount =0;
+    DTNodeCount =0;
     depth =0;
     leafCount =0;
-    countNodes(_root, nodeCount, 0, depth, leafCount);
+    countDTNodes(_root, DTNodeCount, 0, depth, leafCount);
 }
 
 scent_class_t DecisionTree::predict(const float* features) const{
-    const Node* node = _root;
+    const DTNode* DTNode = _root;
 
-    while(node && node->featureIndex >=0){
-        if(features[node->featureIndex] <node->threshold){
-            node = node->left;
+    while(DTNode && DTNode->featureIndex >=0){
+        if(features[DTNode->featureIndex] <DTNode->threshold){
+            DTNode = DTNode->left;
         }
         else{
-            node = node->right;
+            DTNode = DTNode->right;
         }
     }
-    return node ? node->label : SCENT_CLASS_UNKNOWN;
+    return DTNode ? DTNode->label : SCENT_CLASS_UNKNOWN;
 }

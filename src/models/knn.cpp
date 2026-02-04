@@ -1,6 +1,69 @@
 #include "knn.h"
 #include <algorithm>
 #include <vector>
+#include <fstream>
+#include <iostream>
+#include <cmath>
+
+static const uint32_t KNN_MAGIC = 0x4B4E4E4C;
+static const uint16_t KNN_VERSION = 1;
+
+bool KNN::saveModel(const char* filename)const{
+    if(!_samples || _sample_count ==0){
+        std::cerr << "No model data to save." << std::endl;
+        return false;
+    }
+
+    std::ofstream file(filename, std::ios::binary);
+    if(!file.is_open()){
+        return false;
+    }
+
+    file.write(reinterpret_cast<const char*>(&KNN_MAGIC), sizeof(KNN_MAGIC));
+    file.write(reinterpret_cast<const char*>(&KNN_VERSION), sizeof(KNN_VERSION));
+    file.write(reinterpret_cast<const char*>(&_k), sizeof(_k));
+
+    uint16_t featureCount = KNN_FEATURE_COUNT;
+    file.write(reinterpret_cast<const char*>(&featureCount), sizeof(featureCount));
+    file.write(reinterpret_cast<const char*>(&_sample_count), sizeof(_sample_count));
+
+    for(uint16_t i=0; i<_sample_count; i++){
+        uint8_t label = static_cast<uint8_t>(_samples[i].label);
+        file.write(reinterpret_cast<const char*>(&label), sizeof(label));
+        file.write(reinterpret_cast<const char*>(_samples[i].features), featureCount * sizeof(float));
+    }
+    file.close();
+    std::cout << "KNN model saved to " << filename << std::endl;
+    return true;
+}
+
+bool KNN::loadModel(const char* filename){
+    std::ifstream file(filename, std::ios::binary);
+    if(!file.is_open()){
+        std::cerr << "Failed to open model file: " << filename << std::endl;
+        return false;
+    }
+
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+    if(magic != KNN_MAGIC || version != KNN_VERSION){
+        std::cerr << "Invalid KNN model file." << std::endl;
+        return false;
+    }
+
+    file.read(reinterpret_cast<char*>(&_k), sizeof(_k));
+
+    uint16_t featureCount = 0;
+    file.read(reinterpret_cast<char*>(&featureCount), sizeof(featureCount));
+    file.read(reinterpret_cast<char*>(&_sample_count), sizeof(_sample_count));
+
+    std::cout << "Loading KNN model with " << _sample_count << " samples." << std::endl;
+    file.close();
+    return true;
+}
 
 struct Neighbour{
     float distance;
