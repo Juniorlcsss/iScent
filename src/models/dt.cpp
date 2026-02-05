@@ -4,9 +4,10 @@
 #include <map>
 #include <algorithm>
 #include <fstream>
+#include <array>
 
 static const uint32_t DT_MAGIC = 0x44544D4C;
-static const uint16_t DT_VERSION = 1;
+static const uint16_t DT_VERSION = 2;
 
 DecisionTree::~DecisionTree(){
     if(_ownedRoot && _root){
@@ -57,6 +58,8 @@ void DecisionTree::saveTreeDTNode(std::ofstream &file, const DTNode* DTNode) con
     file.write(reinterpret_cast<const char*>(&label), sizeof(label));
     file.write(reinterpret_cast<const char*>(&DTNode->featureIndex), sizeof(DTNode->featureIndex));
     file.write(reinterpret_cast<const char*>(&DTNode->threshold), sizeof(DTNode->threshold));
+    file.write(reinterpret_cast<const char*>(&DTNode->majorityCount), sizeof(DTNode->majorityCount));
+    file.write(reinterpret_cast<const char*>(&DTNode->totalSamples), sizeof(DTNode->totalSamples));
 
     saveTreeDTNode(file, DTNode->left);
     saveTreeDTNode(file, DTNode->right);
@@ -73,7 +76,7 @@ bool DecisionTree::loadModel(const char* filename){
     file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
 
-    if(magic != DT_MAGIC || version != DT_VERSION){
+    if(magic != DT_MAGIC || version < 1 || version > DT_VERSION){
         std::cerr << "Invalid Decision Tree model file." << std::endl;
         return false;
     }
@@ -90,7 +93,7 @@ bool DecisionTree::loadModel(const char* filename){
     file.read(reinterpret_cast<char*>(&maxDepth), sizeof(maxDepth));
     file.read(reinterpret_cast<char*>(&minSamples), sizeof(minSamples));
 
-    _root = loadTreeDTNode(file);
+    _root = loadTreeDTNode(file, version);
     _ownedRoot = true;
 
     file.close();
@@ -98,7 +101,7 @@ bool DecisionTree::loadModel(const char* filename){
     return true;
 }
 
-DTNode* DecisionTree::loadTreeDTNode(std::ifstream &file){
+DTNode* DecisionTree::loadTreeDTNode(std::ifstream &file, uint16_t version){
     uint8_t exists = 0;
     file.read(reinterpret_cast<char*>(&exists), sizeof(exists));
     if(!exists){
@@ -111,9 +114,17 @@ DTNode* DecisionTree::loadTreeDTNode(std::ifstream &file){
     node->label = static_cast<scent_class_t>(label);
     file.read(reinterpret_cast<char*>(&node->featureIndex), sizeof(node->featureIndex));
     file.read(reinterpret_cast<char*>(&node->threshold), sizeof(node->threshold));
+    if(version >= 2){
+        file.read(reinterpret_cast<char*>(&node->majorityCount), sizeof(node->majorityCount));
+        file.read(reinterpret_cast<char*>(&node->totalSamples), sizeof(node->totalSamples));
+    }
+    else{
+        node->majorityCount = 1;
+        node->totalSamples = 1;
+    }
 
-    node->left = loadTreeDTNode(file);
-    node->right = loadTreeDTNode(file);
+    node->left = loadTreeDTNode(file, version);
+    node->right = loadTreeDTNode(file, version);
     return node;
 }
 
@@ -134,6 +145,23 @@ void DecisionTree::train(const ml_training_sample_t *samples, uint16_t count, ui
 DTNode* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t* samples, uint8_t depth, uint8_t maxDepth, uint8_t minSampleSplit){
     DTNode* node = new DTNode();
 
+    node->totalSamples = sampleIndicies.size();
+
+    std::array<uint16_t, SCENT_CLASS_COUNT> classCounts = {0};
+    for(auto idx:sampleIndicies){
+        classCounts[samples[idx].label]++;
+    }
+
+    uint16_t majorityCount = 0;
+    scent_class_t majorityLabel = SCENT_CLASS_UNKNOWN;
+    for(uint16_t i=0; i<SCENT_CLASS_COUNT; i++){
+        if(classCounts[i] > majorityCount){
+            majorityCount = classCounts[i];
+            majorityLabel = static_cast<scent_class_t>(i);
+        }
+    }
+    node->majorityCount = majorityCount;
+
     if(sampleIndicies.size()==0){
         node->label = SCENT_CLASS_UNKNOWN;
         return node;
@@ -145,7 +173,7 @@ DTNode* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, con
     }
 
     if(uniqueClasses.size()==1 ||depth >= maxDepth || sampleIndicies.size()<minSampleSplit){
-        node->label = getMajorityClass(sampleIndicies,samples);
+        node->label = majorityLabel;
         return node;
     }
 
@@ -156,7 +184,7 @@ DTNode* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, con
     findBestSplit(sampleIndicies, samples, bestFeatureIndex, bestThreshold, bestGini);
 
     if(bestFeatureIndex <0){
-        node->label = getMajorityClass(sampleIndicies,samples);
+        node->label = majorityLabel;
         return node;
     }
 
@@ -175,7 +203,7 @@ DTNode* DecisionTree::buildTree(const std::vector<uint16_t> &sampleIndicies, con
 
     if(leftIdx.empty()||rightIdx.empty()){
         node->featureIndex = -1;
-        node->label = getMajorityClass(sampleIndicies,samples);
+        node->label = majorityLabel;
         return node;
     }
 
@@ -337,6 +365,11 @@ void DecisionTree::getStats(){
 }
 
 scent_class_t DecisionTree::predict(const float* features) const{
+    float output = 0.0f;
+    return predictWithConfidence(features, output);
+}
+
+scent_class_t DecisionTree::predictWithConfidence(const float* features, float &confidenceOut) const{
     const DTNode* DTNode = _root;
 
     while(DTNode && DTNode->featureIndex >=0){
@@ -347,5 +380,10 @@ scent_class_t DecisionTree::predict(const float* features) const{
             DTNode = DTNode->right;
         }
     }
-    return DTNode ? DTNode->label : SCENT_CLASS_UNKNOWN;
+    if(DTNode){
+        confidenceOut = (DTNode->totalSamples > 0) ? static_cast<float>(DTNode->majorityCount) / static_cast<float>(DTNode->totalSamples) : 1.0f;
+        return DTNode->label;
+    }
+    confidenceOut = 0.0f;
+    return SCENT_CLASS_UNKNOWN;
 }

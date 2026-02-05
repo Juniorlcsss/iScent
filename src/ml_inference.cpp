@@ -236,28 +236,6 @@ bool MLInference::isModelAvailable(ml_model_source_t model) const{
     return _model_available[model];
 }
 
-
-void MLInference::extractGasFeatures(float* output, const float window[][BME688_NUM_HEATER_STEPS], uint16_t samples){
-    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS; i++){
-        float values[ML_WINDOW_SIZE];
-
-        //get vals from heater across window
-        for(uint16_t s=0; s<samples && s<ML_WINDOW_SIZE; s++){
-            values[s] = window[s][i];
-        }
-
-        //stats
-        float mean = computeMean(values, samples);
-        float std = computeSTD(values, samples, mean);
-        float slope = computeSlope(values, samples);
-
-        //normalise
-        output[i*3+0] = (mean >0) ? log10f(mean) / 6.0f:0.0f;
-        output[i*3+1] = (std>0) ? log10f(std) / 6.0f:0.0f;
-        output[i*3+2] = slope / 1000.0f;
-    }
-}
-
 void MLInference::computeStats(float* stats, const float* window, uint16_t size){
     if(size==0){
         memset(stats,0,5*sizeof(float));
@@ -423,16 +401,28 @@ bool MLInference::runInference(ml_prediction_t &pred){
         }
 
         case ML_MODEL_DECISION_TREE: {
+            float confidence = 1.0f;
+#ifdef DT_HAS_CONFIDENCE
+            uint8_t cls = dt_predict_with_confidence(_feature_buffer.features, &confidence);
+#else
             uint8_t cls = dt_predict(_feature_buffer.features);
+#endif
             pred.inferenceTimeMs = (micros() - start_time) / 1000;
             pred.predictedClass = (scent_class_t)cls;
-            pred.confidence = 1.0f;
+            pred.confidence = confidence;
             memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
             if(pred.predictedClass < ML_CLASS_COUNT){
-                pred.classConfidences[pred.predictedClass] = 1.0f;
+                pred.classConfidences[pred.predictedClass] = confidence;
             }
-            pred.isAnomalous = false;
-            pred.anomalyScore = 0.0f;
+            if(pred.confidence < _confidence_threshold){
+                pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+                pred.isAnomalous = true;
+                pred.anomalyScore = 1.0f - pred.confidence;
+            } else {
+                pred.isAnomalous = false;
+                pred.anomalyScore = 0.0f;
+            }
             pred.valid = true;
             break;
         }
@@ -447,8 +437,15 @@ bool MLInference::runInference(ml_prediction_t &pred){
             if(pred.predictedClass < ML_CLASS_COUNT){
                 pred.classConfidences[pred.predictedClass] = confidence;
             }
-            pred.isAnomalous = false;
-            pred.anomalyScore = 0.0f;
+            if(pred.confidence < _confidence_threshold){
+                pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+                pred.isAnomalous = true;
+                pred.anomalyScore = 1.0f - pred.confidence;
+            } else {
+                pred.isAnomalous = false;
+                pred.anomalyScore = 0.0f;
+            }
             pred.valid = true;
             break;
         }
@@ -463,8 +460,15 @@ bool MLInference::runInference(ml_prediction_t &pred){
             if(pred.predictedClass < ML_CLASS_COUNT){
                 pred.classConfidences[pred.predictedClass] = confidence;
             }
-            pred.isAnomalous = false;
-            pred.anomalyScore = 0.0f;
+            if(pred.confidence < _confidence_threshold){
+                pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+                pred.isAnomalous = true;
+                pred.anomalyScore = 1.0f - pred.confidence;
+            } else {
+                pred.isAnomalous = false;
+                pred.anomalyScore = 0.0f;
+            }
             pred.valid = true;
             break;
         }

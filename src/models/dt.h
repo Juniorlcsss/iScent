@@ -22,9 +22,11 @@ struct DTNode{
     scent_class_t label;
     int featureIndex;
     float threshold;
+    uint16_t majorityCount;
+    uint16_t totalSamples;
     DTNode* left;
     DTNode* right;
-    DTNode() : label(SCENT_CLASS_UNKNOWN), featureIndex(-1), threshold(0.0f), left(nullptr), right(nullptr) {}
+    DTNode() : label(SCENT_CLASS_UNKNOWN), featureIndex(-1), threshold(0.0f), majorityCount(0), totalSamples(0), left(nullptr), right(nullptr) {}
 };
 #endif
 
@@ -46,6 +48,7 @@ public:
     void printTree(int maxDepth=5) const;
 
     scent_class_t predict(const float* features) const;
+    scent_class_t predictWithConfidence(const float* features, float &confidenceOut) const;
 
     bool saveModel(const char* file) const;
     bool loadModel(const char* file);
@@ -71,7 +74,7 @@ private:
     void countDTNodes(const DTNode* DTNode, uint16_t &count, uint16_t depth, uint16_t &maxDepth, uint16_t &leafCount)const;
 
     void saveTreeDTNode(std::ofstream &file, const DTNode* DTNode) const;
-    DTNode* loadTreeDTNode(std::ifstream &file);
+    DTNode* loadTreeDTNode(std::ifstream &file, uint16_t version);
 };
 
 #endif
