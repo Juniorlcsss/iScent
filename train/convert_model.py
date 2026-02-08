@@ -422,10 +422,205 @@ class KNNModelConverter(BaseModelConverter):
         self.sample_count = 0
         self.samples = []
 
+    def load_binary(self, filepath):
+        """Load binary KNN model file"""
+        with open(filepath, 'rb') as f:
+            magic, version = struct.unpack('<IH', f.read(6))
+            
+            if magic != self.MAGIC:
+                raise ValueError(f"Invalid KNN magic number: {hex(magic)}")
+            if version != self.VERSION:
+                raise ValueError(f"Unsupported KNN version: {version}")
+
+            self.k = struct.unpack('<B', f.read(1))[0]
+            self.feature_count = struct.unpack('<H', f.read(2))[0]
+            self.sample_count = struct.unpack('<H', f.read(2))[0]
+            
+            self.samples = []
+            for _ in range(self.sample_count):
+                label = struct.unpack('<B', f.read(1))[0]
+                features = []
+                for _ in range(self.feature_count):
+                    feat = struct.unpack('<f', f.read(4))[0]
+                    features.append(feat)
+                self.samples.append({'label': label, 'features': features})
+        
+        print(f"Loaded KNN model: K={self.k}, {self.sample_count} samples, {self.feature_count} features")
+    
+
+    def generate_header(self, output_path):
+        """Generate c header for knn"""
+        with open(output_path, 'w') as f:
+            self._write_file_header(f, "KNN", f"K={self.k}, Samples={self.sample_count}")
+            
+            f.write("#ifndef KNN_MODEL_DATA_H\n")
+            f.write("#define KNN_MODEL_DATA_H\n\n")
+            f.write("#include <stdint.h>\n")
+            f.write("#include <string.h>\n")
+            f.write("#include <math.h>\n\n")
+            
+            self._write_progmem_macros(f)
+            
+            f.write("// Model Parameters\n")
+            f.write(f"#define KNN_K {self.k}\n")
+            f.write(f"#define KNN_FEATURE_COUNT {self.feature_count}\n")
+            f.write(f"#define KNN_SAMPLE_COUNT {self.sample_count}\n")
+            f.write(f"#define KNN_NUM_CLASSES {self.num_classes}\n\n")
+            
+            self._write_class_names(f, "KNN")
+            
+            #struct
+            f.write("typedef struct {\n")
+            f.write("    uint8_t label;\n")
+            f.write(f"    float features[{self.feature_count}];\n")
+            f.write("} knn_sample_t;\n\n")
+            
+            #arr
+            f.write(f"static const knn_sample_t KNN_SAMPLES[{self.sample_count}] PROGMEM = {{\n")
+            for i, sample in enumerate(self.samples):
+                f.write(f"    {{{sample['label']}, {{")
+                for j, feat in enumerate(sample['features']):
+                    f.write(f"{feat:.6f}f")
+                    if j < len(sample['features']) - 1:
+                        f.write(", ")
+                f.write("}}")
+                if i < self.sample_count - 1:
+                    f.write(",")
+                f.write("\n")
+            f.write("};\n\n")
+            
+            self._write_knn_inference_functions(f)
+            
+            f.write("#endif // KNN_MODEL_DATA_H\n")
+        
+        print(f"KNN header generated: {output_path}")
+        estimated_size = self.sample_count * (1 + self.feature_count * 4)
+        print(f"  Estimated flash: {estimated_size:,} bytes")
 
 
+    def _write_knn_inference_functions(self, f):
+        """Write KNN inference functions"""
+        f.write("//===========================================================================\n")
+        f.write("// KNN Inference Functions\n")
+        f.write("//===========================================================================\n\n")
+        
+        #distance
+        f.write("static inline float knn_euclidean_distance(const float* a, const float* b) {\n")
+        f.write("    float sum = 0.0f;\n")
+        f.write(f"    for (uint16_t i = 0; i < {self.feature_count}; i++) {{\n")
+        f.write("        float d = a[i] - b[i];\n")
+        f.write("        sum += d * d;\n")
+        f.write("    }\n")
+        f.write("    return sqrtf(sum);\n")
+        f.write("}\n\n")
+        
+        #pred
+        f.write("static inline uint8_t knn_predict(const float* features) {\n")
+        f.write("    // Simple implementation - find K nearest neighbors\n")
+        f.write(f"    float distances[{self.sample_count}];\n")
+        f.write(f"    uint8_t labels[{self.sample_count}];\n")
+        f.write("    \n")
+        f.write("    // Calculate all distances\n")
+        f.write(f"    for (uint16_t i = 0; i < {self.sample_count}; i++) {{\n")
+        f.write("        knn_sample_t sample;\n")
+        f.write("        memcpy_P(&sample, &KNN_SAMPLES[i], sizeof(knn_sample_t));\n")
+        f.write("        distances[i] = knn_euclidean_distance(features, sample.features);\n")
+        f.write("        labels[i] = sample.label;\n")
+        f.write("    }\n")
+        f.write("    \n")
+        f.write("    // Find K nearest (simple selection)\n")
+        f.write(f"    uint16_t votes[{self.num_classes}] = {{0}};\n")
+        f.write(f"    for (uint8_t k = 0; k < {self.k}; k++) {{\n")
+        f.write("        float minDist = 1e30f;\n")
+        f.write("        uint16_t minIdx = 0;\n")
+        f.write(f"        for (uint16_t i = 0; i < {self.sample_count}; i++) {{\n")
+        f.write("            if (distances[i] < minDist) {\n")
+        f.write("                minDist = distances[i];\n")
+        f.write("                minIdx = i;\n")
+        f.write("            }\n")
+        f.write("        }\n")
+        f.write(f"        if (labels[minIdx] < {self.num_classes}) votes[labels[minIdx]]++;\n")
+        f.write("        distances[minIdx] = 1e30f; // Mark as used\n")
+        f.write("    }\n")
+        f.write("    \n")
+        f.write("    // Find majority class\n")
+        f.write("    uint8_t best = 0;\n")
+        f.write("    uint16_t maxVotes = 0;\n")
+        f.write(f"    for (uint8_t i = 0; i < {self.num_classes}; i++) {{\n")
+        f.write("        if (votes[i] > maxVotes) { maxVotes = votes[i]; best = i; }\n")
+        f.write("    }\n")
+        f.write("    return best;\n")
+        f.write("}\n\n")
+        
+        #confidence
+        f.write("static inline uint8_t knn_predict_with_confidence(const float* features, float* confidence) {\n")
+        f.write(f"    float distances[{self.sample_count}];\n")
+        f.write(f"    uint8_t labels[{self.sample_count}];\n")
+        f.write("    \n")
+        f.write(f"    for (uint16_t i = 0; i < {self.sample_count}; i++) {{\n")
+        f.write("        knn_sample_t sample;\n")
+        f.write("        memcpy_P(&sample, &KNN_SAMPLES[i], sizeof(knn_sample_t));\n")
+        f.write("        distances[i] = knn_euclidean_distance(features, sample.features);\n")
+        f.write("        labels[i] = sample.label;\n")
+        f.write("    }\n")
+        f.write("    \n")
+        f.write(f"    uint16_t votes[{self.num_classes}] = {{0}};\n")
+        f.write(f"    for (uint8_t k = 0; k < {self.k}; k++) {{\n")
+        f.write("        float minDist = 1e30f;\n")
+        f.write("        uint16_t minIdx = 0;\n")
+        f.write(f"        for (uint16_t i = 0; i < {self.sample_count}; i++) {{\n")
+        f.write("            if (distances[i] < minDist) { minDist = distances[i]; minIdx = i; }\n")
+        f.write("        }\n")
+        f.write(f"        if (labels[minIdx] < {self.num_classes}) votes[labels[minIdx]]++;\n")
+        f.write("        distances[minIdx] = 1e30f;\n")
+        f.write("    }\n")
+        f.write("    \n")
+        f.write("    uint8_t best = 0;\n")
+        f.write("    uint16_t maxVotes = 0;\n")
+        f.write("    uint16_t secondVotes = 0;\n")
+        f.write(f"    for (uint8_t i = 0; i < {self.num_classes}; i++) {{\n")
+        f.write("        if (votes[i] > maxVotes) {\n")
+        f.write("            secondVotes = maxVotes;\n")
+        f.write("            maxVotes = votes[i];\n")
+        f.write("            best = i;\n")
+        f.write("        } else if (votes[i] > secondVotes) {\n")
+        f.write("            secondVotes = votes[i];\n")
+        f.write("        }\n")
+        f.write("    }\n")
+        f.write("\n")
+        f.write("    // Laplace smoothing plus vote-margin scaling to temper over-confident outputs on OOD inputs\n")
+        f.write("    const float alpha = 0.3f;\n")
+        f.write("    const float denom = (float)KNN_K + alpha * (float)KNN_NUM_CLASSES;\n")
+        f.write("    const float laplaceTop = (maxVotes + alpha) / (denom > 0.0f ? denom : 1.0f);\n")
+        f.write("    float margin = (float)(maxVotes - secondVotes) / (float)KNN_K;\n")
+        f.write("    if (margin < 0.0f) margin = 0.0f;\n")
+        f.write("\n")
+        f.write("    *confidence = laplaceTop * (0.5f + 0.5f * margin);\n")
+        f.write("    return best;\n")
+        f.write("}\n\n")
+        
+        f.write("static inline const char* knn_get_class_name(uint8_t idx) {\n")
+        f.write(f"    return (idx < {self.num_classes}) ? KNN_CLASS_NAMES[idx] : \"unknown\";\n")
+        f.write("}\n\n")
 
 
+    def print_summary(self):
+        """Print KNN summary"""
+        print("\n=== KNN Model Summary ===")
+        print(f"K: {self.k}")
+        print(f"Samples: {self.sample_count}")
+        print(f"Features: {self.feature_count}")
+        
+        #distrubution
+        class_counts = [0] * self.num_classes
+        for sample in self.samples:
+            if sample['label'] < self.num_classes:
+                class_counts[sample['label']] += 1
+        print("\nClass Distribution:")
+        for i, count in enumerate(class_counts):
+            if count > 0:
+                name = CLASS_NAMES[i] if i < len(CLASS_NAMES) else f"class_{i}"
+                print(f"  [{i:2d}] {name}: {count}")
 
 
 
