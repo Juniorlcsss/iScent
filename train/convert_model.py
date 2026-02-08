@@ -1,0 +1,482 @@
+"""
+Usage: python convert_model.py <model.bin> <output.h>
+"""
+
+import struct
+import sys
+from pathlib import Path
+from datetime import datetime
+from collections import deque
+from abc import ABC, abstractmethod
+
+#cfg
+CLASS_NAMES = ["camomile",
+    "thoroughly minted infusion",
+    "berry burst",
+    "darjeeling blend",
+    "decaf nutmeg and vanilla",
+    "earl grey",
+    "english breakfast tea",
+    "fresh orange",
+    "garden selection (lemon)",
+    "green tea",
+    "raspberry",
+    "sweet cherry"]
+
+FEATURE_NAMES = ["temp1","temp2","hum1","hum2", "pres1","pres2", "gas1_0", "gas2_0", "delta_temp", "delta_hum", "delta_pres", "delta_gas"]
+
+#magic numbers
+MAGIC_RF = 0x52464D4C  #"RFML"
+MAGIC_DT = 0x44544D4C  #"DTML"
+MAGIC_KNN = 0x4B4E4E4C  #"KNNL"
+
+class BaseModelConverter(ABC):
+    """Abstract base class for model converters"""
+
+    def __init__(self):
+        self.feature_count = 12
+        self.num_classes = len(CLASS_NAMES)
+    
+    @abstractmethod
+    def load_binary(self,path):
+        """Load binary model from file"""
+        pass
+
+    @abstractmethod
+    def generate_header(self,path):
+        """Generate C++ header file from model"""
+        pass
+
+    @abstractmethod
+    def print_summary(self):
+        """Print model summary to console"""
+        pass
+
+    def _write_file_header(self, f, model, info):
+        f.write("// Auto-generated C++ header file\n")
+        f.write(f"// Model Type: {model}\n")
+        f.write(f"// Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        if info:
+            f.write(f"// Info: {info}\n\n")
+
+    def _write_class_names(self,f,prefix):
+        """Write class names array"""
+        f.write("// Class Names\n")
+        f.write(f"static const char* {prefix}_CLASS_NAMES[{self.num_classes}] = {{\n")
+        for i, name in enumerate(CLASS_NAMES):
+            comma = "," if i < self.num_classes - 1 else ""
+            f.write(f'    "{name}"{comma}\n')
+        f.write("};\n\n")
+
+    def _write_progmem_macros(self,f):
+        """Progmem compatability macros"""
+        f.write("#ifdef __AVR__\n")
+        f.write("  #include <avr/pgmspace.h>\n")
+        f.write("#else\n")
+        f.write("  #ifndef PROGMEM\n")
+        f.write("    #define PROGMEM\n")
+        f.write("  #endif\n")
+        f.write("  #ifndef pgm_read_byte\n")
+        f.write("    #define pgm_read_byte(addr) (*(const uint8_t *)(addr))\n")
+        f.write("  #endif\n")
+        f.write("  #ifndef pgm_read_word\n")
+        f.write("    #define pgm_read_word(addr) (*(const uint16_t *)(addr))\n")
+        f.write("  #endif\n")
+        f.write("  #ifndef pgm_read_float\n")
+        f.write("    #define pgm_read_float(addr) (*(const float *)(addr))\n")
+        f.write("  #endif\n")
+        f.write("  #ifndef memcpy_P\n")
+        f.write("    #define memcpy_P(dest, src, n) memcpy((dest), (src), (n))\n")
+        f.write("  #endif\n")
+        f.write("#endif\n\n")
+
+#===========================================================================================================
+#Random Forest Converter
+#===========================================================================================================
+class RFModelConverter(BaseModelConverter):
+    """Random forest model converter"""
+    MAGIC = MAGIC_RF
+    VERSION = 1
+
+    def __init__(self):
+        super().__init__()
+        self.num_trees = 0
+        self.max_depth = 0
+        self.min_samples = 0
+        self.feature_subset_ratio = 0.0
+        self.feature_subset_size = 0
+        self.oob_err = 0.0
+        self.feature_importance = []
+        self.trees = []
+        self.flat_nodes = []
+        self.tree_offsets = []
+
+    def load_binary(self, path):
+        """load rf bin"""
+        with open(path, "rb") as f:
+            magic,ver = struct.unpack("<IH", f.read(6))
+
+            if magic != self.MAGIC:
+                print(f"Read Magic: {hex(magic)}, Expected: {hex(self.MAGIC)}")
+                raise ValueError("Invalid RF model file")
+            if ver != self.VERSION:
+                raise ValueError("Unsupported RF model version")
+            
+            #read paramaters
+            self.num_trees = struct.unpack("<H", f.read(2))[0]
+            self.max_depth = struct.unpack("<B", f.read(1))[0]
+            self.min_samples = struct.unpack('<B', f.read(1))[0]
+            self.feature_subset_ratio = struct.unpack('<f', f.read(4))[0]
+            self.feature_count = struct.unpack('<H', f.read(2))[0]
+            self.feature_subset_size = struct.unpack('<H', f.read(2))[0]
+            self.oob_error = struct.unpack('<f', f.read(4))[0]
+
+            #feature importance
+            self.feature_importance=[]
+            for _ in range(self.feature_count):
+                importance = struct.unpack("<f",f.read(4))[0]
+                self.feature_importance.append(importance)
+
+            #read trees
+            self.trees = []
+            for _ in range(struct.unpack('<H', f.read(2))[0]):
+                tree = self._read_tree(f)
+                self.trees.append(tree)
+
+        self._flatten_trees()
+
+        print("Model loaded successfully.")
+
+    def _read_tree(self,f):
+        """read node recursively"""
+        if not struct.unpack("<B", f.read(1))[0]:
+            print("Could not read tree node") 
+            return None
+        
+        #get data
+        label = struct.unpack('<B', f.read(1))[0]
+        feature_index = struct.unpack('<i', f.read(4))[0]
+        threshold = struct.unpack('<f', f.read(4))[0]
+
+        node = {
+            "label": label,
+            "feature_index": feature_index,
+            "threshold": threshold,
+            "left": self._read_tree(f),
+            "right": self._read_tree(f)
+        }
+        return node
+    
+    def _flatten_trees(self):
+        self.flat_nodes = []
+        self.tree_offsets = []
+
+        for tree in self.trees:
+            self.tree_offsets.append(len(self.flat_nodes))
+            self._flatten_tree(tree)
+
+    def _flatten_tree(self, tree):
+        """flatten using BFS"""
+        if tree is None:
+            return
+        
+        queue = deque([tree])
+        node_list = []
+        node_idx = {}
+
+        while queue:
+            node = queue.popleft()
+            i = len(node_list)
+            node_idx[id(node)] = i
+            node_list.append(node)
+
+            if node["left"]:
+                queue.append(node["left"])
+            if node["right"]:
+                queue.append(node["right"])
+        
+        offset = len(self.flat_nodes)
+        for node in node_list:
+            left_idx =-1
+            right_idx = -1
+
+            if node["left"]:
+                left_idx = offset + node_idx[id(node["left"])]
+            if node["right"]:
+                right_idx = offset + node_idx[id(node["right"])]
+
+            flat_node = {
+                'feature_index': node['feature_index'],
+                'label': node['label'],
+                'threshold': node['threshold'],
+                'left_child': left_idx,
+                'right_child': right_idx
+            }
+            self.flat_nodes.append(flat_node)
+
+    def generate_header(self, output_path):
+        """Generate C header file for RF"""
+        total_nodes = len(self.flat_nodes)
+        estimated_size = total_nodes * 12
+        
+        with open(output_path, 'w') as f:
+            self._write_file_header(f, "Random Forest", 
+                f"Trees: {len(self.trees)}, Nodes: {total_nodes}, OOB Error: {self.oob_error * 100:.2f}%")
+            
+            f.write("#ifndef RF_MODEL_DATA_H\n")
+            f.write("#define RF_MODEL_DATA_H\n\n")
+            f.write("#include <stdint.h>\n")
+            f.write("#include <string.h>\n\n")
+            
+            self._write_progmem_macros(f)
+            
+            f.write("// Model Parameters\n")
+            f.write(f"#define RF_NUM_TREES {len(self.trees)}\n")
+            f.write(f"#define RF_MAX_DEPTH {self.max_depth}\n")
+            f.write(f"#define RF_FEATURE_COUNT {self.feature_count}\n")
+            f.write(f"#define RF_TOTAL_NODES {total_nodes}\n")
+            f.write(f"#define RF_NUM_CLASSES {self.num_classes}\n")
+            f.write(f"#define RF_OOB_ERROR {self.oob_error:.6f}f\n\n")
+            
+            self._write_class_names(f, "RF")
+            
+            f.write("// Feature Importance (normalized)\n")
+            f.write(f"static const float RF_FEATURE_IMPORTANCE[{self.feature_count}] PROGMEM = {{\n    ")
+            for i, imp in enumerate(self.feature_importance):
+                f.write(f"{imp:.6f}f")
+                if i < self.feature_count - 1:
+                    f.write(", ")
+                if (i + 1) % 6 == 0 and i < self.feature_count - 1:
+                    f.write("\n    ")
+            f.write("\n};\n\n")
+            
+            f.write("// Node Structure\n")
+            f.write("typedef struct {\n")
+            f.write("    int8_t featureIndex;\n")
+            f.write("    uint8_t label;\n")
+            f.write("    float threshold;\n")
+            f.write("    int16_t leftChild;\n")
+            f.write("    int16_t rightChild;\n")
+            f.write("} rf_node_t;\n\n")
+        
+            f.write(f"static const rf_node_t RF_NODES[{total_nodes}] PROGMEM = {{\n")
+            
+            current_tree = 0
+            for i, node in enumerate(self.flat_nodes):
+                if i in self.tree_offsets:
+                    tree_idx = self.tree_offsets.index(i)
+                    f.write(f"    // Tree {tree_idx}\n")
+                
+                f.write(f"    {{{node['feature_index']}, {node['label']}, ")
+                f.write(f"{node['threshold']:.6f}f, ")
+                f.write(f"{node['left_child']}, {node['right_child']}}}")
+                
+                if i < total_nodes - 1:
+                    f.write(",")
+                f.write("\n")
+            
+            f.write("};\n\n")
+            
+
+            f.write(f"static const uint16_t RF_TREE_ROOTS[{len(self.trees)}] PROGMEM = {{")
+            for i, offset in enumerate(self.tree_offsets):
+                if i > 0:
+                    f.write(", ")
+                if i % 10 == 0:
+                    f.write("\n    ")
+                f.write(str(offset))
+            f.write("\n};\n\n")     
+            self._write_rf_inference_functions(f)
+            
+            f.write("#endif // RF_MODEL_DATA_H\n")
+        
+        print(f"RF header generated: {output_path}")
+        print(f"  Estimated flash: {estimated_size:,} bytes")
+    
+    def _write_rf_inference_functions(self, f):
+        """Write RF inference functions"""
+        f.write("//===========================================================================\n")
+        f.write("// RF Inference Functions\n")
+        f.write("//===========================================================================\n\n")
+        
+        #macro
+        f.write("#define RF_READ_NODE(idx) ({ \\\n")
+        f.write("    rf_node_t _n; \\\n")
+        f.write("    memcpy_P(&_n, &RF_NODES[idx], sizeof(rf_node_t)); \\\n")
+        f.write("    _n; })\n\n")
+        
+        #single tree prediction
+        f.write("static inline uint8_t rf_predict_tree(uint16_t treeIdx, const float* features) {\n")
+        f.write("    uint16_t nodeIdx = pgm_read_word(&RF_TREE_ROOTS[treeIdx]);\n")
+        f.write("    rf_node_t node = RF_READ_NODE(nodeIdx);\n")
+        f.write("    \n")
+        f.write("    while (node.featureIndex >= 0) {\n")
+        f.write("        if (features[node.featureIndex] < node.threshold) {\n")
+        f.write("            nodeIdx = node.leftChild;\n")
+        f.write("        } else {\n")
+        f.write("            nodeIdx = node.rightChild;\n")
+        f.write("        }\n")
+        f.write("        node = RF_READ_NODE(nodeIdx);\n")
+        f.write("    }\n")
+        f.write("    return node.label;\n")
+        f.write("}\n\n")
+        
+        #forest prediction
+        f.write("static inline uint8_t rf_predict(const float* features) {\n")
+        f.write(f"    uint16_t votes[{self.num_classes}] = {{0}};\n")
+        f.write("    for (uint16_t t = 0; t < RF_NUM_TREES; t++) {\n")
+        f.write("        uint8_t pred = rf_predict_tree(t, features);\n")
+        f.write(f"        if (pred < {self.num_classes}) votes[pred]++;\n")
+        f.write("    }\n")
+        f.write("    uint8_t best = 0;\n")
+        f.write("    uint16_t maxVotes = 0;\n")
+        f.write(f"    for (uint8_t i = 0; i < {self.num_classes}; i++) {{\n")
+        f.write("        if (votes[i] > maxVotes) { maxVotes = votes[i]; best = i; }\n")
+        f.write("    }\n")
+        f.write("    return best;\n")
+        f.write("}\n\n")
+        
+        #confidence
+        f.write("static inline uint8_t rf_predict_with_confidence(const float* features, float* confidence) {\n")
+        f.write(f"    uint16_t votes[{self.num_classes}] = {{0}};\n")
+        f.write("    for (uint16_t t = 0; t < RF_NUM_TREES; t++) {\n")
+        f.write("        uint8_t pred = rf_predict_tree(t, features);\n")
+        f.write(f"        if (pred < {self.num_classes}) votes[pred]++;\n")
+        f.write("    }\n")
+        f.write("    uint8_t best = 0;\n")
+        f.write("    uint16_t maxVotes = 0;\n")
+        f.write("    uint16_t secondVotes = 0;\n")
+        f.write(f"    for (uint8_t i = 0; i < {self.num_classes}; i++) {{\n")
+        f.write("        if (votes[i] > maxVotes) {\n")
+        f.write("            secondVotes = maxVotes;\n")
+        f.write("            maxVotes = votes[i];\n")
+        f.write("            best = i;\n")
+        f.write("        } else if (votes[i] > secondVotes) {\n")
+        f.write("            secondVotes = votes[i];\n")
+        f.write("        }\n")
+        f.write("    }\n")
+        f.write("\n")
+        f.write("    // Laplace smoothing with vote margin and OOB-based calibration to dampen overconfident outputs\n")
+        f.write("    const float laplaceTop = (float)(maxVotes + 1) / (float)(RF_NUM_TREES + RF_NUM_CLASSES);\n")
+        f.write("    float margin = (float)(maxVotes - secondVotes) / (float)RF_NUM_TREES;\n")
+        f.write("    if (margin < 0.0f) margin = 0.0f;\n")
+        f.write("    const float calibration = 1.0f - RF_OOB_ERROR;\n")
+        f.write("\n")
+        f.write("    *confidence = laplaceTop * (0.5f + 0.5f * margin) * calibration;\n")
+        f.write("    return best;\n")
+        f.write("}\n\n")
+        
+        #get class name
+        f.write("static inline const char* rf_get_class_name(uint8_t idx) {\n")
+        f.write(f"    return (idx < {self.num_classes}) ? RF_CLASS_NAMES[idx] : \"unknown\";\n")
+        f.write("}\n\n")
+    
+    def print_summary(self):
+        """Print RF model summary"""
+        print("\n=== Random Forest Model Summary ===")
+        print(f"Trees: {len(self.trees)}")
+        print(f"Total Nodes: {len(self.flat_nodes)}")
+        print(f"Max Depth: {self.max_depth}")
+        print(f"Features: {self.feature_count}")
+        print(f"OOB Error: {self.oob_error * 100:.2f}%")
+        print("\nFeature Importance:")
+
+        for i, imp in enumerate(self.feature_importance):
+            name = FEATURE_NAMES[i] if i < len(FEATURE_NAMES) else f"feature_{i}"
+            bar = "█" * int(imp * 20)
+            print(f"  [{i:2d}] {name:12s} {imp:.4f} {bar}")
+
+
+#===========================================================================================================
+#Decision Tree Converter
+#===========================================================================================================
+
+class DTModelConverter(BaseModelConverter):
+    """Decision Tree model converter"""
+    
+    MAGIC = MAGIC_DT
+    VERSION = 1
+    def __init__(self):
+        super().__init__()
+        self.max_depth = 0
+        self.min_samples = 0
+        self.tree = None
+        self.flat_nodes = []
+
+
+
+
+
+#===========================================================================================================
+#kNN converter
+#===========================================================================================================
+class KNNModelConverter(BaseModelConverter):
+    """KNN model converter"""
+    
+    MAGIC = MAGIC_KNN
+    VERSION = 1
+    
+    def __init__(self):
+        super().__init__()
+        self.k = 5
+        self.sample_count = 0
+        self.samples = []
+
+
+
+
+
+
+
+
+#===========================================================================================================
+#main sec
+#===========================================================================================================
+def detect_model_type(filepath):
+    """Auto-detect model type from file"""
+    with open(filepath, 'rb') as f:
+        magic = struct.unpack('<I', f.read(4))[0]
+    
+    if magic == MAGIC_RF:
+        return 'rf', RFModelConverter()
+    elif magic == MAGIC_DT:
+        return 'dt', DTModelConverter()
+    elif magic == MAGIC_KNN:
+        return 'knn', KNNModelConverter()
+    else:
+        raise ValueError(f"Unknown model type. Magic: {hex(magic)}")
+    
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        print("\nSupported magic numbers:")
+        print(f"  Random Forest: {hex(MAGIC_RF)}")
+        print(f"  Decision Tree: {hex(MAGIC_DT)}")
+        print(f"  KNN:           {hex(MAGIC_KNN)}")
+        sys.exit(1)
+    
+    input_path = sys.argv[1]
+    
+    if len(sys.argv) > 2:
+        output_path = sys.argv[2]
+    else:
+        stem = Path(input_path).stem
+        output_path = f"{stem}_data.h"
+    
+    try:
+        model_type, converter = detect_model_type(input_path)
+        print(f"Detected model type: {model_type.upper()}")
+        
+        converter.load_binary(input_path)
+        converter.print_summary()
+        converter.generate_header(output_path)
+        
+        print(f"\n✓ Conversion complete: {output_path}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
