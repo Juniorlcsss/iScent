@@ -395,16 +395,208 @@ class DTModelConverter(BaseModelConverter):
     """Decision Tree model converter"""
     
     MAGIC = MAGIC_DT
-    VERSION = 1
+    VERSION = 2
+    
     def __init__(self):
         super().__init__()
         self.max_depth = 0
         self.min_samples = 0
         self.tree = None
         self.flat_nodes = []
+    
+    def load_binary(self, filepath):
+        """Load binary DT model file"""
+        with open(filepath, 'rb') as f:
+            magic, version = struct.unpack('<IH', f.read(6))
+            
+            if magic != self.MAGIC:
+                raise ValueError(f"Invalid DT magic number: {hex(magic)}")
+            if version not in (1, self.VERSION):
+                raise ValueError(f"Unsupported DT version: {version}")
+            
+            self.feature_count = struct.unpack('<H', f.read(2))[0]
+            self.max_depth = struct.unpack('<B', f.read(1))[0]
+            self.min_samples = struct.unpack('<B', f.read(1))[0]
+            
+            self.tree = self._read_tree(f, version)
+        
+        self._flatten_tree()
+        
+        print(f"Loaded DT model: {len(self.flat_nodes)} nodes, {self.feature_count} features")
+    
+    def _read_tree(self, f, version):
+        """Recursively read tree nodes"""
+        exists = struct.unpack('<B', f.read(1))[0]
+        if not exists:
+            return None
+        
+        label = struct.unpack('<B', f.read(1))[0]
+        feature_index = struct.unpack('<i', f.read(4))[0]
+        threshold = struct.unpack('<f', f.read(4))[0]
+        if version >= 2:
+            majority_count = struct.unpack('<H', f.read(2))[0]
+            total_samples = struct.unpack('<H', f.read(2))[0]
+        else:
+            majority_count = 1
+            total_samples = 1
+        
+        node = {
+            'label': label,
+            'feature_index': feature_index,
+            'threshold': threshold,
+            'majority_count': majority_count,
+            'total_samples': total_samples,
+            'left': self._read_tree(f, version),
+            'right': self._read_tree(f, version)
+        }
+        return node
+
+    def _flatten_tree(self):
+        """Flatten tree to array"""
+        if self.tree is None:
+            return
+        
+        self.flat_nodes = []
+        queue = deque([self.tree])
+        node_list = []
+        node_to_idx = {}
+        
+        while queue:
+            node = queue.popleft()
+            idx = len(node_list)
+            node_to_idx[id(node)] = idx
+            node_list.append(node)
+            
+            if node['left']:
+                queue.append(node['left']) 
+            if node['right']:
+                queue.append(node['right']) 
+        
+        for node in node_list:
+            left_idx = node_to_idx[id(node['left'])] if node['left'] else -1    
+            right_idx = node_to_idx[id(node['right'])] if node['right'] else -1
+            
+            self.flat_nodes.append({
+                'feature_index': node['feature_index'],
+                'label': node['label'],
+                'threshold': node['threshold'],
+                'majority_count': node['majority_count'],
+                'total_samples': node['total_samples'], 
+                'left_child': left_idx,
+                'right_child': right_idx
+            })
+    
+    def generate_header(self, output_path):
+        """Generate C header for DT"""
+        total_nodes = len(self.flat_nodes)
+        
+        with open(output_path, 'w') as f:
+            self._write_file_header(f, "Decision Tree", f"Nodes: {total_nodes}")    
+            
+            f.write("#ifndef DT_MODEL_DATA_H\n")
+            f.write("#define DT_MODEL_DATA_H\n\n")
+            f.write("#include <stdint.h>\n")
+            f.write("#include <string.h>\n\n")  
+            
+            self._write_progmem_macros(f)
+            
+            f.write("// Model Parameters\n")
+            f.write(f"#define DT_FEATURE_COUNT {self.feature_count}\n")
+            f.write(f"#define DT_TOTAL_NODES {total_nodes}\n")
+            f.write(f"#define DT_NUM_CLASSES {self.num_classes}\n")
+            f.write(f"#define DT_MAX_DEPTH {self.max_depth}\n")
+            f.write(f"#define DT_HAS_CONFIDENCE 1\n\n")
+            
+            self._write_class_names(f, "DT")
+            
+            #struct
+            f.write("typedef struct {\n")
+            f.write("    int8_t featureIndex;\n")
+            f.write("    uint8_t label;\n")
+            f.write("    float threshold;\n")   
+            f.write("    uint16_t majorityCount;\n")
+            f.write("    uint16_t totalSamples;\n")
+            f.write("    int16_t leftChild;\n")
+            f.write("    int16_t rightChild;\n")
+            f.write("} dt_node_t;\n\n")
+            
+            #arr
+            f.write(f"static const dt_node_t DT_NODES[{total_nodes}] PROGMEM = {{\n")
+            for i, node in enumerate(self.flat_nodes):
+                f.write(f"    {{{node['feature_index']}, {node['label']}, ")
+                f.write(f"{node['threshold']:.6f}f, ")
+                f.write(f"{node['majority_count']}, {node['total_samples']}, ")
+                f.write(f"{node['left_child']}, {node['right_child']}}}")
+                if i < total_nodes - 1:
+                    f.write(",")
+                f.write("\n")
+            f.write("};\n\n")
+            
+            self._write_dt_inference_functions(f)
+            
+            f.write("#endif // DT_MODEL_DATA_H\n")
+        print(f"DT header generated: {output_path}")
 
 
+    
+    def _write_dt_inference_functions(self, f):
+        """Write DT inference functions"""
+        f.write("//===========================================================================\n")
+        f.write("// DT Inference Functions\n")
+        f.write("//===========================================================================\n\n")
+        
+        f.write("#define DT_READ_NODE(idx) ({ \\\n")
+        f.write("    dt_node_t _n; \\\n")
+        f.write("    memcpy_P(&_n, &DT_NODES[idx], sizeof(dt_node_t)); \\\n")
+        f.write("    _n; })\n\n")
+        
+        f.write("static inline uint8_t dt_predict(const float* features) {\n")
+        f.write("    uint16_t nodeIdx = 0;\n")
+        f.write("    dt_node_t node = DT_READ_NODE(nodeIdx);\n")
+        f.write("    \n")
+        f.write("    while (node.featureIndex >= 0) {\n")
+        f.write("        if (features[node.featureIndex] < node.threshold) {\n")
+        f.write("            nodeIdx = node.leftChild;\n")
+        f.write("        } else {\n")
+        f.write("            nodeIdx = node.rightChild;\n")
+        f.write("        }\n")
+        f.write("        node = DT_READ_NODE(nodeIdx);\n")
+        f.write("    }\n")
+        f.write("    return node.label;\n")
+        f.write("}\n\n")
 
+        f.write("static inline uint8_t dt_predict_with_confidence(const float* features, float* confidence_out) {\n")
+        f.write("    uint16_t nodeIdx = 0;\n")
+        f.write("    dt_node_t node = DT_READ_NODE(nodeIdx);\n")
+        f.write("    while (node.featureIndex >= 0) {\n")
+        f.write("        if (features[node.featureIndex] < node.threshold) {\n")
+        f.write("            nodeIdx = node.leftChild;\n")
+        f.write("        } else {\n")
+        f.write("            nodeIdx = node.rightChild;\n")
+        f.write("        }\n")
+        f.write("        node = DT_READ_NODE(nodeIdx);\n")
+        f.write("    }\n")
+        f.write("    if (confidence_out) {\n")
+        f.write("        // Laplace-smoothed leaf confidence with stronger prior and heavier support damping\n")
+        f.write("        const float total = (float)node.totalSamples;\n")
+        f.write("        const float majority = (float)node.majorityCount;\n")
+        f.write("        const float laplace = (majority + 0.5f) / (total + (float)DT_NUM_CLASSES);\n")
+        f.write("        const float support = total / (total + 20.0f);\n")
+        f.write("        *confidence_out = laplace * support;\n")
+        f.write("    }\n")
+        f.write("    return node.label;\n")
+        f.write("}\n\n")
+        
+        f.write("static inline const char* dt_get_class_name(uint8_t idx) {\n")
+        f.write(f"    return (idx < {self.num_classes}) ? DT_CLASS_NAMES[idx] : \"unknown\";\n")
+        f.write("}\n\n")
+    
+    def print_summary(self):
+        """Print DT summary"""
+        print("\n=== Decision Tree Model Summary ===")
+        print(f"Total Nodes: {len(self.flat_nodes)}")
+        print(f"Max Depth: {self.max_depth}")
+        print(f"Features: {self.feature_count}")
 
 
 #===========================================================================================================
