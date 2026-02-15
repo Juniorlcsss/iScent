@@ -506,6 +506,9 @@ bool BME688Handler::readSingleReading(Bme68x &sensor, sensor_data_t &data){
     memset(&data, 0, sizeof(data));
     data.timestamp = millis();
 
+    //preserve profile
+    const bool hadProfile = (_current_profile.steps > 0);
+
     //
     uint16_t zeroTemp[1] = {0};
     uint16_t zeroDur[1] = {0};
@@ -526,9 +529,18 @@ bool BME688Handler::readSingleReading(Bme68x &sensor, sensor_data_t &data){
         data.gas_resistance = bmeData.gas_resistance;
         data.gas_index = bmeData.gas_index;
         data.status = bmeData.status;
-        data.valid = true;
+        data.valid = true; 
+
+        if(hadProfile) {
+            setHeaterProfile(_current_profile);
+        }
         return true;
     }
+
+    if(hadProfile){
+        setHeaterProfile(_current_profile);
+    }
+    
     _last_error = ERROR_SENSOR_READ;
     return false;
 }

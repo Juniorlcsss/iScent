@@ -220,7 +220,13 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
     clear();
     drawHeader("Sensor Data");
 
-    if(!data.primary.complete) return;
+    if(data.primary.validReadings == 0){
+        //refresh state
+        _dsp->setCursor(0, 16);
+        _dsp->print("Waiting for data...");
+        refresh();
+        return;
+    }
 
     float pgVal=0, sgVal=0, dgVal=0; const char* pgUnit=""; const char* sgUnit=""; const char* dgUnit="";
     formatGasValue(data.primary.gas_resistances[0], pgVal, pgUnit);
@@ -260,9 +266,7 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
     y += 10;
     _dsp->setCursor(0, y);
     _dsp->printf("dT:%.1f dG:%.2f%s", data.delta_temp, dgVal, dgUnit);
-
-
-
+    refresh();
 
 }
 
