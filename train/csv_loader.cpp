@@ -7,6 +7,116 @@
 #include <cstring>
 #include <cctype>
 #include <iomanip>
+#include <array>
+#include <cmath>
+
+namespace{
+struct Baseline{
+    float temp1;
+    float temp2;
+    float hum1;
+    float hum2;
+    float pres1;
+    float pres2;
+    float gas1;
+    float gas2;
+};
+
+static float median(std::vector<float> &v){
+    if(v.empty()){
+        return 0.0f;
+    }
+
+    const size_t mid = v.size() /2;
+    std::nth_element(v.begin(),v.begin()+mid, v.end());
+    float med = v[mid];
+
+    if(v.size()%2==0){
+        std::nth_element(v.begin(),v.begin()+mid-1, v.end());
+        med= 0.5f* (med+v[mid-1]);
+    }
+    return med;
+}
+
+static Baseline computeBaseline(const std::vector<std::array<float,8>> &cal){
+    Baseline b{};
+    if(cal.empty()){
+        return b;
+    }
+
+    std::vector<float> temp1v, temp2v,hum1v,hum2v,pres1v,pres2v,gas1v,gas2v;
+    temp1v.reserve(cal.size());
+    temp2v.reserve(cal.size());
+    hum1v.reserve(cal.size());
+    hum2v.reserve(cal.size());
+    pres1v.reserve(cal.size());
+    pres2v.reserve(cal.size());
+    gas1v.reserve(cal.size());
+    gas2v.reserve(cal.size());
+
+    for(const auto &sample:cal){
+        temp1v.push_back(sample[0]);
+        hum1v.push_back(sample[1]);
+        pres1v.push_back(sample[2]);
+        gas1v.push_back(sample[3]);
+        temp2v.push_back(sample[4]);
+        hum2v.push_back(sample[5]);
+        pres2v.push_back(sample[6]);
+        gas2v.push_back(sample[7]);
+    }
+
+    b.temp1= median(temp1v);
+    b.temp2= median(temp2v);
+    b.hum1= median(hum1v);
+    b.hum2= median(hum2v);
+    b.pres1= median(pres1v);
+    b.pres2= median(pres2v);
+    b.gas1= median(gas1v);
+    b.gas2= median(gas2v);
+
+    if(b.gas1==0.0f){
+        b.gas1=1.0f;
+    }
+    if(b.gas2==0.0f){
+        b.gas2=1.0f;
+    }
+
+    return b;
+    }
+
+static void applyBaselineTransform(csv_training_sample_t& sample, const Baseline& b){
+    const float gas1_raw = sample.features[3];
+    const float gas2_raw = sample.features[7];
+
+    //gas response ratios
+    float gas1_response = (b.gas1 > 0) ? gas1_raw / b.gas1 : 1.0f;
+    float gas2_response = (b.gas2 > 0) ? gas2_raw / b.gas2 : 1.0f;
+    //cross-sensor gas ratio
+    float gas_cross_ratio = (gas2_raw > 0) ? gas1_raw / gas2_raw : 1.0f;
+
+    //ABSOLUTE gas
+    float gas_diff_abs = fabsf(gas1_response - gas2_response);
+
+    //ABSOLUTE differentials
+    float delta_temp_abs = fabsf(sample.features[0] - sample.features[4]);
+    float delta_hum_abs  = fabsf(sample.features[1] - sample.features[5]);
+    float delta_pres_abs = fabsf(sample.features[2] - sample.features[6]);
+
+    float log_gas_cross = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
+
+    sample.features[0] = gas1_response;
+    sample.features[1] = gas2_response;
+    sample.features[2] = gas_cross_ratio;
+    sample.features[3] = gas_diff_abs;
+    sample.features[4] = delta_temp_abs;
+    sample.features[5] = delta_hum_abs;
+    sample.features[6] = delta_pres_abs;
+    sample.features[7] = log_gas_cross;
+}
+
+}//end of ns
+
+
 
 CSVLoader::CSVLoader() : _samples(nullptr), _count(0), _capacity(0) {}
 
@@ -104,120 +214,165 @@ scent_class_t CSVLoader::getClassFromName(const std::string &name){
     return SCENT_CLASS_UNKNOWN;
 }
 
-bool CSVLoader::load(const std::string &filename){
+bool CSVLoader::load(const std::string& filename) {
     std::ifstream file(filename);
-
-    if(!file.is_open()){
-        std::cerr << "Error opening file: " << filename << std::endl;
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file: " << filename << std::endl;
         return false;
     }
-
-    //clean
-    if(_samples){
+    
+    //Clean up
+    if (_samples) {
         delete[] _samples;
     }
     _classCounts.clear();
-
+    
     //alloc
     _capacity = 50000;
     _samples = new csv_training_sample_t[_capacity];
     _count = 0;
-
+    
     std::string line;
     bool isHeader = true;
     int lineNum = 0;
     int skipped = 0;
-
+    int calibrationCount = 0;
+    int ambientBlocks = 0;
+    bool baselineReady = false;
+    Baseline baseline{};
+    std::vector<std::array<float, 8>> calibrationRows;
+    
     int labelCol = 1;
     int featureStartCol = 2;
-
-    while(std::getline(file,line)){
+    
+    while (std::getline(file, line)) {
         lineNum++;
-        line=trim(line);
-
-        if(line.empty()){
-            continue;
-        }
-
-        //parse
+        line = trim(line);
+        
+        if (line.empty()) continue;
+        
         std::vector<std::string> tokens;
         std::stringstream ss(line);
         std::string token;
-
-        while(std::getline(ss,token,',')){
+        
+        while (std::getline(ss, token, ',')) {
             tokens.push_back(trim(token));
         }
-
-        //handle head
-        if(isHeader){
-            isHeader=false;
-
-            //get label and feature cols
-            for(size_t i=0; i<tokens.size(); i++){
+        
+        //handle header
+        if (isHeader) {
+            isHeader = false;
+            
+            //find label and feature columns
+            for (size_t i = 0; i < tokens.size(); i++) {
                 std::string col = toLower(tokens[i]);
-
-                if(col == "label"){
-                    labelCol=i;
+                if (col == "label") {
+                    labelCol = i;
                 }
-                if(col == "temp1"){
-                    featureStartCol=i;
+                if (col == "temp1") {
+                    featureStartCol = i;
                 }
             }
-
-            std::cout << "Detected label column: " << labelCol << std::endl;
-            std::cout << "Detected feature start column: " << featureStartCol << std::endl;
+            
+            std::cout << "Header: label at col " << labelCol<< ", features start at col " << featureStartCol << std::endl;
             continue;
         }
-
-        //need label and 12f
-        if(tokens.size() < (size_t)(featureStartCol + CSV_FEATURE_COUNT)){
-            std::cerr << "Skipping line " << lineNum << ": not enough columns" << std::endl;
+        
+        const int requiredFeatures = featureStartCol + 8;
+        if (tokens.size() < (size_t)requiredFeatures) {
             skipped++;
             continue;
         }
-
-        //parse label
-        scent_class_t label = getClassFromName(tokens[labelCol]);
-        if(label == SCENT_CLASS_UNKNOWN){
-            std::cerr << "Skipping line " << lineNum << ": unknown label '" << tokens[labelCol] << "'" << std::endl;
+        
+        //Parse label 
+        std::string rawLabel = toLower(tokens[labelCol]);
+        bool isCalibration = (rawLabel == "calibration" || rawLabel == "baseline");
+        bool isAmbient = (rawLabel == "ambient");
+        scent_class_t label = (isCalibration || isAmbient) ? SCENT_CLASS_UNKNOWN : getClassFromName(tokens[labelCol]);
+        if (!isCalibration && !isAmbient && label == SCENT_CLASS_UNKNOWN) {
+            std::cerr << "Warning: Unknown label '" << tokens[labelCol]<< "' at line " << lineNum << std::endl;
             skipped++;
             continue;
         }
-
-        //parse feats
-        csv_training_sample_t sample;
-        sample.label = label;
-
-        bool valid=true;
-        for(int i=0; i<CSV_FEATURE_COUNT;i++){
-            try{
-                sample.features[i] = std::stof(tokens[featureStartCol + i]);
-            }
-            catch(...){
-                valid=false;
-                std::cerr << "Skipping line " << lineNum << ": invalid feature '" << tokens[featureStartCol + i] << "'" << std::endl;
+        
+        //parse raw features
+        float raw[8]{};
+        bool validFeatures = true;
+        for (int i = 0; i < 8; i++) {
+            size_t tokIdx = featureStartCol + i;
+            if (tokIdx >= tokens.size()) { validFeatures = false; break; }
+            try {
+                raw[i] = std::stof(tokens[tokIdx]);
+            } catch (...) {
+                validFeatures = false;
                 break;
             }
         }
 
-        if(!valid){
-            skipped++;
+        if (!validFeatures) { skipped++;     continue; }
+
+        if (isCalibration || isAmbient) {
+            calibrationRows.push_back({raw[0],raw[1],raw[2],raw[3],raw[4],raw[5],raw[6],raw[7]});
+            if (isCalibration) {
+                calibrationCount++;
+            }
+            if (isAmbient) {
+                ambientBlocks++;
+            }
+            baselineReady = false;
             continue;
         }
 
-        //add sample
-        if(_count < _capacity){
-            _samples[_count++] =sample;
-            _classCounts[label]++;
+        //ensure we have a baseline
+        if (!baselineReady) {
+            if (calibrationRows.empty()) {
+                std::cerr <<"Warning: No ambient/calibration rows before line "<<lineNum<< "; skipping sample" << std::endl;
+                skipped++;
+                continue;
+            }
+            baseline = computeBaseline(calibrationRows);
+            calibrationRows.clear();
+            baselineReady = true;
         }
-        else{
-            std::cerr << "Reached max capacity of " << _capacity << " samples. Stopping load." << std::endl;
+
+        csv_training_sample_t sample{};
+        sample.label = label;
+        sample.features[0] = raw[0];
+        sample.features[1] = raw[1];
+        sample.features[2] = raw[2];
+        sample.features[3] = raw[3];
+        sample.features[4] = raw[4];
+        sample.features[5] = raw[5];
+        sample.features[6] = raw[6];
+        sample.features[7] = raw[7];
+
+        applyBaselineTransform(sample, baseline);
+
+        if (_count < _capacity) {
+            _samples[_count++] = sample;
+            _classCounts[label]++;
+        } else {
+            std::cerr << "Warning: Maximum capacity reached" << std::endl;
             break;
         }
     }
     file.close();
-
-    std::cout << "Loaded " << _count << " samples, skipped " << skipped << " lines." << std::endl;
+    
+    std::cout << "Loaded " << _count << " samples";
+    if (calibrationCount == 0 && ambientBlocks == 0) {
+        std::cout << " (no baseline rows found; data may be invalid)";
+    }
+    if (ambientBlocks > 0) {
+        std::cout << " | ambient blocks: " << ambientBlocks;
+    }
+    if (calibrationCount > 0) {
+        std::cout << " | calibration rows: " << calibrationCount;
+    }
+    if (skipped > 0) {
+        std::cout << " (skipped " << skipped << " invalid rows)";
+    }
+    std::cout << std::endl;
+    
     return _count > 0;
 }
 
