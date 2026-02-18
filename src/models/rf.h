@@ -81,10 +81,9 @@ private:
     float _oobError;
 
     std::vector<float> _featureImportance;
-    mutable std::mt19937 _rng;
 
     //tree builder
-    RFNode* buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t *samples, uint8_t depth);
+    RFNode* buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t *samples, uint8_t depth, std::vector<float>& featureImportance, std::mt19937& rng);
     
     void findBestSplit(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t *samples, const std::vector<uint16_t> &featureSubset, int &bestFeatureIndex, float &bestThreshold, float &bestGini);
 
@@ -94,9 +93,9 @@ private:
 
     scent_class_t predictTree(const RFNode* RFNode, const float* features)const;
 
-    void bootstrapSample(uint16_t samples, std::vector<uint16_t> &inBag, std::vector<uint16_t> &outOfBag);
+    void bootstrapSample(uint16_t samples, std::vector<uint16_t> &inBag, std::vector<uint16_t> &outOfBag, std::mt19937& rng);
 
-    std::vector<uint16_t> getRandomFeatureSubset();
+    std::vector<uint16_t> getRandomFeatureSubset(std::mt19937& rng);
 
     void deleteTree(RFNode* RFNode);
     void clearTrees();

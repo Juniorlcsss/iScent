@@ -8,6 +8,10 @@
 #include <fstream>
 #include <cstring>
 #include <queue>
+#include <atomic>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 void RandomForest::exportAsHeader(const char* path) const {
     std::string binPath = std::string(path) + ".bin";
@@ -190,11 +194,7 @@ void RandomForest::flattenTree(const RFNode* root, std::vector<FlatRFNode> &flat
 RandomForest::RandomForest(uint16_t numTrees, uint8_t maxDepth, uint8_t minSamples, float featureSubsetRatio):
     _numTrees(numTrees), _maxDepth(maxDepth), _minSamples(minSamples),
     _featureSubsetRatio(featureSubsetRatio), _featureCount(12),
-    _featureSubsetSize(0), _oobError(0.0f) 
-    {
-        std::random_device rd;
-        _rng = std::mt19937(rd());
-}
+    _featureSubsetSize(0), _oobError(0.0f) {}
 
 RandomForest::~RandomForest() {
     clearTrees();
@@ -215,7 +215,7 @@ void RandomForest::deleteTree(RFNode* RFNode) {
     }
 }
 
-void RandomForest::bootstrapSample(uint16_t totalSamples, std::vector<uint16_t>& inBag,std::vector<uint16_t>& outOfBag){
+void RandomForest::bootstrapSample(uint16_t totalSamples, std::vector<uint16_t>& inBag, std::vector<uint16_t>& outOfBag, std::mt19937& rng){
     std::vector<bool> selected(totalSamples, false);
     std::uniform_int_distribution<uint16_t> dst(0, totalSamples - 1);
 
@@ -223,12 +223,11 @@ void RandomForest::bootstrapSample(uint16_t totalSamples, std::vector<uint16_t>&
     inBag.reserve(totalSamples);
 
     for(uint16_t i=0; i<totalSamples; i++){
-        uint16_t idx = dst(_rng);
+        uint16_t idx=dst(rng);
         inBag.push_back(idx);
         selected[idx] = true;
     }
 
-    //collect
     outOfBag.clear();
     for(uint16_t i=0; i<totalSamples; i++){
         if(!selected[i]){
@@ -237,14 +236,13 @@ void RandomForest::bootstrapSample(uint16_t totalSamples, std::vector<uint16_t>&
     }
 }
 
-std::vector<uint16_t> RandomForest::getRandomFeatureSubset(){
+std::vector<uint16_t> RandomForest::getRandomFeatureSubset(std::mt19937& rng){
     std::vector<uint16_t> allFeatures(_featureCount);
     for(uint16_t i=0; i<_featureCount; i++){
         allFeatures[i] = i;
     }
 
-    std::shuffle(allFeatures.begin(), allFeatures.end(), _rng);
-
+    std::shuffle(allFeatures.begin(), allFeatures.end(), rng);
     std::vector<uint16_t> subset(allFeatures.begin(), allFeatures.begin() + _featureSubsetSize);
     return subset;
 }
@@ -265,33 +263,61 @@ void RandomForest::train(const ml_training_sample_t *samples, uint16_t count, ui
     //init feature importance
     _featureImportance.assign(_featureCount, 0.0f);
 
-    //OOB
-    std::vector<std::vector<scent_class_t>> oobPredictions(count);
+    //per-tree storage
+    std::vector<RFNode*> builtTrees(_numTrees, nullptr);
+    std::vector<std::vector<uint16_t>> outOfBagSets(_numTrees);
+    std::vector<uint32_t> seeds(_numTrees);
+    std::random_device rd;
+    for (uint16_t i = 0; i < _numTrees; ++i) {
+        seeds[i] = rd();
+    }
 
     std::cout << "Training Random Forest with " << _numTrees << " trees." << std::endl;
     std::cout << "Feature subset size: " << _featureSubsetSize << "/" << _featureCount << std::endl;
 
-    _trees.reserve(_numTrees);
+    std::atomic<int> builtCount{0};
 
-    for(uint16_t i=0; i<_numTrees;i++){
-        std::vector<uint16_t> inBag, outOfBag;
-        bootstrapSample(count, inBag, outOfBag);
+    #pragma omp parallel for schedule(dynamic)
+    for (int i=0; i<static_cast<int>(_numTrees);++i) {
+        std::mt19937 rng(seeds[i]);
+        std::vector<uint16_t>inBag, outOfBag;
+        bootstrapSample(count,inBag,outOfBag,rng);
 
-        //build
-        RFNode* tree = buildTree(inBag, samples, 0);
-        _trees.push_back(tree);
+        std::vector<float> localImportance(_featureCount,  0.0f);
+        RFNode* tree = buildTree(inBag,samples,0,localImportance,rng);
 
-        //OOB pred
-        for(uint16_t j : outOfBag){
-            scent_class_t pred = predictTree(tree, samples[j].features);
-            oobPredictions[j].push_back(pred);
+        builtTrees[i] = tree;
+        outOfBagSets[i] = std::move(outOfBag);
+
+        //reduce fi
+        #pragma omp critical
+        {
+            for (uint16_t f=0; f<_featureCount; ++f) {
+                _featureImportance[f] += localImportance[f];
+            }
         }
 
-        if((i+1)%10 == 0 || i==_numTrees-1){
-            std::cout << "Trees Built:" << (i+1) << "/" << _numTrees << "\r" << std::flush;
+        int done = ++builtCount;
+        if (done % 10 == 0 || done == _numTrees) {
+            #pragma omp critical
+            {
+                std::cout <<"Trees Built:"<< done<< "/" << _numTrees<< "\r"<< std::flush;
+            }
         }
     }
     std::cout << std::endl;
+
+    _trees = std::move(builtTrees);
+
+    //oob predictions
+    std::vector<std::vector<scent_class_t>> oobPredictions(count);
+    for (uint16_t i=0; i<_numTrees; ++i) {
+        const RFNode* tree=_trees[i];
+        for (uint16_t idx:outOfBagSets[i]) {
+            scent_class_t pred=predictTree(tree,samples[idx].features);
+            oobPredictions[idx].push_back(pred);
+        }
+    }
 
     //get oob error
     uint16_t correct=0, total=0;
@@ -342,7 +368,7 @@ void RandomForest::train(const ml_training_sample_t *samples, uint16_t count, ui
     std::cout << "Training complete. OOB Error: " << std::fixed << std::setprecision(2) << (_oobError * 100) << "%" << std::endl;
 }
 
-RFNode* RandomForest::buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t *samples, uint8_t depth){
+RFNode* RandomForest::buildTree(const std::vector<uint16_t> &sampleIndicies, const ml_training_sample_t *samples, uint8_t depth, std::vector<float>& featureImportance, std::mt19937& rng){
     RFNode* node = new RFNode();
 
     if(sampleIndicies.empty()){
@@ -361,7 +387,7 @@ RFNode* RandomForest::buildTree(const std::vector<uint16_t> &sampleIndicies, con
         return node;
     }
 
-    std::vector<uint16_t> featureSubset = getRandomFeatureSubset();
+    std::vector<uint16_t> featureSubset = getRandomFeatureSubset(rng);
 
     //best split
     int bestFeatureIndex = -1;
@@ -378,7 +404,7 @@ RFNode* RandomForest::buildTree(const std::vector<uint16_t> &sampleIndicies, con
 
     //importance
     float parentGini = calculateGini(sampleIndicies, samples);
-    _featureImportance[bestFeatureIndex] += (parentGini - bestGini) * sampleIndicies.size();
+    featureImportance[bestFeatureIndex] += (parentGini - bestGini) * sampleIndicies.size();
 
     //split samples
     std::vector<uint16_t> leftI, rightI;
@@ -396,8 +422,8 @@ RFNode* RandomForest::buildTree(const std::vector<uint16_t> &sampleIndicies, con
         return node;
     }
 
-    node->left = buildTree(leftI, samples, depth + 1);
-    node->right = buildTree(rightI, samples, depth + 1);
+    node->left = buildTree(leftI, samples, depth + 1, featureImportance, rng);
+    node->right = buildTree(rightI, samples, depth + 1, featureImportance, rng);
     return node;
 }
 
