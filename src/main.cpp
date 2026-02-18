@@ -31,11 +31,20 @@ float lastCalibLoggedProgress = -1.0f;
 uint32_t lastCalibProgressMs = 0;
 float lastCalibProgressVal = -1.0f;
 uint32_t calibStartTime = 0;
+uint32_t ambientSettleStartMs = 0;
+uint32_t ambientCaptureStartMs = 0;
+bool ambientSettling = false;
+uint8_t ambientSkipSamples = 0;
+const uint32_t AMBIENT_SETTLE_MS = 5000UL; 
+const uint32_t AMBIENT_CAPTURE_DURATION_MS = 15000UL; 
+const uint8_t AMBIENT_SKIP_AFTER_SETTLE = 1; 
+const uint32_t AMBIENT_SAMPLE_INTERVAL_MS = 1000UL;
 const uint32_t CALIB_TIMEOUT_MARGIN_MS = 60000UL;
 const uint32_t CALIB_MAX_DURATION_MS = (uint32_t)(BME688_GAS_BASE_SAMPLES * (BME688_SAMPLE_RATE + 500UL)) + CALIB_TIMEOUT_MARGIN_MS;
 
 dual_sensor_data_t currentSensorData;
 ml_prediction_t currentPrediction;
+inference_mode_t currentInferenceMode = INFERENCE_MODE_SINGLE;
 
 bool loggingActive = false;
 bool continuousInference = true;
@@ -44,6 +53,8 @@ int16_t currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
 uint32_t lastLoggingRetryMs = 0;
 const uint32_t LOGGING_RETRY_INTERVAL_MS = 3000;
 uint8_t predictionSelection = 0;
+bool temporalInProgress=false;
+uint32_t temporalStartTime=0;
 
 //===========================================================================================================
 //functions
@@ -55,6 +66,7 @@ void handleBLE();
 void updateDisplay();
 bool performSampling();
 void performInference();
+bool performTemporalEnsembleInference();
 void enterState(system_state_t newState);
 void handleError(error_code_t error);
 void buttonCallback(button_id_t buttonId, button_event_t event);
@@ -82,6 +94,7 @@ void settingsActionWipeSD();
 void settingsActionBackToMain();
 void refreshSettingsMenu();
 void applyHeaterProfile(uint8_t index);
+void settingsActionCycleInferenceMode();
 
 //data collection menu actions
 void dataCollectActionCycleLabel();
@@ -110,6 +123,7 @@ static char settingsLabelDisplay[24] = "Display: Normal";
 static char settingsLabelExport[] = "Export Last Log";
 static char settingsLabelWipe[] = "Wipe SD Card";
 static char settingsLabelBack[] = "Back";
+static char settingsLabelInfMode[28]="Infer: Single";
 
 //data collection labels
 static char collectLabelSelect[24] = "Label: pure camomile";
@@ -153,13 +167,14 @@ uint8_t currentDisplayProfileIndex = 0;
 
 //settings menu definitions
 menu_item_t settings_menu_items[] = {
-    {settingsLabelCalibrate, settingsActionCalibrate, DISPLAY_MODE_CALIBRATION},
-    {settingsLabelHeater, settingsActionCycleHeaterProfile, DISPLAY_MODE_SETTINGS},
-    {settingsLabelThreshold, settingsActionCycleThresholdProfile, DISPLAY_MODE_SETTINGS},
-    {settingsLabelDisplay, settingsActionToggleDisplayProfile, DISPLAY_MODE_SETTINGS},
-    {settingsLabelExport, settingsActionExportData, DISPLAY_MODE_SETTINGS},
-    {settingsLabelWipe, settingsActionWipeSD, DISPLAY_MODE_SETTINGS},
-    {settingsLabelBack, settingsActionBackToMain, DISPLAY_MODE_MENU}
+    {settingsLabelCalibrate,    settingsActionCalibrate,               DISPLAY_MODE_CALIBRATION},
+    {settingsLabelHeater,       settingsActionCycleHeaterProfile,      DISPLAY_MODE_SETTINGS},
+    {settingsLabelThreshold,    settingsActionCycleThresholdProfile,   DISPLAY_MODE_SETTINGS},
+    {settingsLabelInfMode,      settingsActionCycleInferenceMode,      DISPLAY_MODE_SETTINGS},
+    {settingsLabelDisplay,      settingsActionToggleDisplayProfile,    DISPLAY_MODE_SETTINGS},
+    {settingsLabelExport,       settingsActionExportData,              DISPLAY_MODE_SETTINGS},
+    {settingsLabelWipe,         settingsActionWipeSD,                  DISPLAY_MODE_SETTINGS},
+    {settingsLabelBack,         settingsActionBackToMain,              DISPLAY_MODE_MENU}
 };
 const uint8_t SETTINGS_MENU_COUNT = sizeof(settings_menu_items) / sizeof(menu_item_t);
 
@@ -231,7 +246,7 @@ void loop(){
         lastDisplayUpdateTime = millis();
     }
 
-    delay(10);
+    delay(1);
 }
 
 bool isMenuNavigationActive(){
@@ -319,9 +334,15 @@ void initialiseSystem(){
         ble.startAdvertising();
     }
 
-    //warmup
-    DEBUG_PRINTLN(F("[INIT] Warmup Phase..."));
-    enterState(STATE_WARMUP);
+    //skip idle warmup
+    if(!sensors.getCalibrationData().calibrated){
+        DEBUG_PRINTLN(F("[INIT] Starting ambient baseline/calibration..."));
+        enterState(STATE_ML_BASELINE_CALIB);
+    } else {
+        DEBUG_PRINTLN(F("[INIT] Calibration present; entering IDLE."));
+        display.setMode(DISPLAY_MODE_MENU);
+        enterState(STATE_IDLE);
+    }
 }
 
 //===========================================================================================================
@@ -340,8 +361,8 @@ void handleStateMachine(){
                 DEBUG_PRINTLN(F("[STATE] Warmup complete."));
                 
                 if(!sensors.getCalibrationData().calibrated){
-                    DEBUG_PRINTLN(F("[STATE] Starting calibration..."));
-                    enterState(STATE_CALIBRATING);
+                    DEBUG_PRINTLN(F("[STATE] Starting ambient baseline before calibration..."));
+                    enterState(STATE_ML_BASELINE_CALIB);
                 }
                 else{
                     DEBUG_PRINTLN(F("[STATE] Entering IDLE state."));
@@ -367,8 +388,10 @@ void handleStateMachine(){
 
             if(sensors.isCalibrating()){
                 float prog = sensors.getCalibrationProgress();
+                uint16_t collected = sensors.getCalibrationCollected();
+                uint16_t target = sensors.getCalibrationTarget();
                 uint32_t now = millis();
-                if((prog - lastCalibLoggedProgress) >= 0.05f || (now - lastCalibDebugTime) >= 2000){
+                if((prog -lastCalibLoggedProgress) >=0.05f || (now-lastCalibDebugTime)>=2000){
                     char buf[96];
                     snprintf(buf, sizeof(buf), "prog=%.3f samples=%lu", prog, sensors.getSampleCount());
                     logger.logCalibDebug(String(buf));
@@ -379,7 +402,16 @@ void handleStateMachine(){
                 if(prog > lastCalibProgressVal + 0.001f){
                     lastCalibProgressVal = prog;
                     lastCalibProgressMs = now;
-                } else if(now - lastCalibProgressMs > 45000UL){
+                }
+                else if(target >0 &&collected+1>= target && (now - lastCalibProgressMs)>3000UL){
+                    logger.logCalibDebug("CALIB_N_MINUS_ONE_FORCE_FINISH");
+                    sensors.finishCalibration();
+                }
+                else if(prog >=0.95f && (now - lastCalibProgressMs) > 12000UL){
+                    logger.logCalibDebug("CALIB_NEAR_DONE_FORCE_FINISH");
+                    sensors.finishCalibration();
+                }
+                else if(now -lastCalibProgressMs > 45000UL){
                     char buf[128];
                     snprintf(buf, sizeof(buf), "CALIB_STALL prog=%.3f dt=%lu err=%s", prog, (unsigned long)(now - lastCalibProgressMs), sensors.getLastErrorString());
                     logger.logCalibDebug(String(buf));
@@ -401,11 +433,57 @@ void handleStateMachine(){
                 DEBUG_PRINTLN(F("[STATE] Calibration complete."));
                 logger.logCalibDebug("CALIB_DONE");
                 logger.flushCalibDebug();
-                DEBUG_PRINTLN(F("[STATE] Rebooting to load saved calibration..."));
-                delay(100);
+                logger.flush();
                 rp2040.reboot();
             }
             break;
+
+        case STATE_ML_BASELINE_CALIB: {
+            uint32_t now = millis();
+
+            //cool before taking ambient baseline
+            if(ambientSettling){
+                if(now - ambientSettleStartMs < AMBIENT_SETTLE_MS){
+                    break;
+                }
+                ambientSettling = false;
+                ambientCaptureStartMs = now;
+                ambientSkipSamples = AMBIENT_SKIP_AFTER_SETTLE;
+                ml.startBaselineCalibration(10);
+            }
+
+            if(!ambientSettling && (now - lastSampleTime) >= AMBIENT_SAMPLE_INTERVAL_MS){
+                if(performSampling()){
+                    lastSampleTime = now;
+                    if(ambientSkipSamples > 0){
+                        ambientSkipSamples--; //discard post-settle samples
+                    } else {
+                        ml.updateBaselineCalibration(currentSensorData);
+                    }
+                }
+            }
+
+            bool ambientDurationElapsed = (!ambientSettling && ambientCaptureStartMs > 0 && (now - ambientCaptureStartMs) >= AMBIENT_CAPTURE_DURATION_MS);
+
+
+             
+            if(ambientDurationElapsed && ml.isBaselineCalibrationComplete()){
+                DEBUG_PRINTLN(F("[STATE] Ambient baseline capture complete. Starting calibration."));
+                logger.setActiveLabel(-1); // stop tagging ambient
+                sensors.setDefaultHeaterProfile(); // restore heater for calibration
+                ambientSettling = false;
+                ambientCaptureStartMs = 0;
+                ambientSkipSamples = 0;
+                enterState(STATE_CALIBRATING);
+            }
+
+            //progress
+            float calib_progress = ml.getBaselineCalibrationProgress();
+            if(calib_progress > 0){
+                DEBUG_PRINTF("[CALIB] Ambient Baseline Progress: %.1f%%\n", calib_progress * 100.0f);
+            }
+            break; 
+        }
 
         case STATE_IDLE:
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
@@ -419,9 +497,21 @@ void handleStateMachine(){
 
                 //move to inference if ready
                 if(continuousInference && ml.isFeatureBufferReady()){
-                    enterState(STATE_INFERENCING);
+                    //base off mode
+                    switch(ml.getInferenceMode()){
+                        case INFERENCE_MODE_TEMPORAL:
+                            enterState(STATE_TEMPORAL_COLLECTING);
+                            break;
+                        
+                        case INFERENCE_MODE_ENSEMBLE:
+                        case INFERENCE_MODE_SINGLE:
+                        default:
+                            enterState(STATE_INFERENCING);
+                            break;
+                    }
                 }
-                else{
+                else
+                {
                     enterState(STATE_IDLE);
                 }
             }
@@ -435,9 +525,42 @@ void handleStateMachine(){
             }
 
             if(millis() - lastInferenceTime >= ML_INFERENCE_INTERVAL_MS){
-                performInference();
-                lastInferenceTime = millis();
+                //dispatch
+                if(ml.runActiveInference(currentPrediction)){
+                    DEBUG_PRINTF("[INFERENCE] Predicted: %s (conf=%.2f, anomaly=%.3f)\n", ml.getClassName(currentPrediction.predictedClass), currentPrediction.confidence, currentPrediction.anomalyScore);
+                
+                    if(ble.isConnected()){
+                        ble.sendPrediction(currentPrediction);
+                    }
+                    if(currentPrediction.isAnomalous){
+                        DEBUG_PRINTLN(F("[INFERENCE] Anomaly detected!"));
+                    }
+                }
+                lastInferenceTime=millis();
                 enterState(STATE_IDLE);
+            }
+            break;
+
+        case STATE_TEMPORAL_COLLECTING:
+            if(millis()-lastSampleTime>=BME688_SAMPLE_RATE){
+                if(performSampling()){
+                    lastSampleTime = millis();
+                }
+            }
+
+            {
+                bool complete = ml.updateTemporalCollection(currentPrediction);
+
+                if(complete){
+                    if(ble.isConnected()){
+                        ble.sendPrediction(currentPrediction);
+                    }
+                    if(currentPrediction.isAnomalous){
+                        DEBUG_PRINTLN(F("[INFERENCE] Anomaly detected!"));
+                    }
+                    lastInferenceTime=millis();
+                    enterState(STATE_IDLE);
+                }
             }
             break;
 
@@ -476,6 +599,12 @@ void enterState(system_state_t newState){
         case STATE_SLEEP:
             sensors.wake();
             break;
+
+        case STATE_TEMPORAL_COLLECTING:
+            if(ml.isTemporalCollectionActive()){
+                ml.cancelTemporalCollection();
+            }
+            break;
         
         default:
             break;
@@ -501,10 +630,24 @@ void enterState(system_state_t newState){
                     display.setMode(DISPLAY_MODE_MENU);
                     display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
                 }
+                
+                if(!collectingLabeled && display.getMode() != DISPLAY_MODE_PREDICTION){
+                    logger.setActiveLabel(LOG_LABEL_AMBIENT);
+                }
+                if(!logger.isLogging()){
+                    logger.startLogging();
+                    loggingActive = true;
+                }
             }
             break;
 
         case STATE_CALIBRATING:
+            logger.setActiveLabel(LOG_LABEL_CALIBRATION);
+            if(!logger.isLogging()){
+                logger.startLogging();
+            }
+            loggingActive = true;
+
             lastCalibLoggedProgress = -1.0f;
             lastCalibDebugTime = 0;
             lastCalibProgressMs = millis();
@@ -513,6 +656,31 @@ void enterState(system_state_t newState){
             logger.startCalibDebug();
             logger.logCalibDebug("CALIB_START");
             sensors.startCalibration(BME688_GAS_BASE_SAMPLES);
+            break;
+
+        case STATE_ML_BASELINE_CALIB:
+            //label as ambient
+            sensors.applyHeaterOffProfile();
+            display.setMode(DISPLAY_MODE_CALIBRATION);
+            logger.setActiveLabel(LOG_LABEL_AMBIENT);
+
+            if(!logger.isLogging()){
+                logger.startLogging();
+            }
+
+            loggingActive = true;
+            ambientSettleStartMs = millis();
+            ambientCaptureStartMs = 0;
+            ambientSettling = true;
+            ambientSkipSamples = AMBIENT_SKIP_AFTER_SETTLE;
+            lastSampleTime = 0;
+            break;
+
+        case STATE_TEMPORAL_COLLECTING:
+            ml.startTemporalCollection();
+            temporalStartTime = millis();
+            temporalInProgress = true;
+
             break;
 
         case STATE_LOGGING:
@@ -541,36 +709,52 @@ void enterState(system_state_t newState){
 //===========================================================================================================
 
 bool performSampling(){
+    const bool needsAmbientRead = (currentState != STATE_CALIBRATING);
+    const bool needsParallelRead = (currentState != STATE_ML_BASELINE_CALIB);
+
     dual_sensor_data_t ambientData;
-    if(!sensors.performFullScan(ambientData)){
-        if(sensors.getLastError() != ERROR_NONE){
+    bool ambientOk = true;
+
+    if(needsAmbientRead){
+        ambientOk = sensors.performFullScan(ambientData);
+        if(!ambientOk && sensors.getLastError() != ERROR_NONE){
             lastError = ERROR_SENSOR_READ;
         }
+    }
+
+    bool parallelOk = true;
+    if(needsParallelRead){
+        parallelOk = sensors.readParallelScan(currentSensorData);
+        
+        if(!parallelOk && sensors.getLastError() != ERROR_NONE){
+            lastError = ERROR_SENSOR_READ;
+        }
+    }
+
+    if(!ambientOk || !parallelOk){
         return false;
     }
 
-    if(!sensors.readParallelScan(currentSensorData)){
-        if(sensors.getLastError() != ERROR_NONE){
-            lastError = ERROR_SENSOR_READ;
-        }
-        return false;
+    if(!needsParallelRead){
+        memcpy(&currentSensorData, &ambientData, sizeof(currentSensorData));
     }
 
-    currentSensorData.primary.temperatures[0] = ambientData.primary.temperatures[0];
-    currentSensorData.primary.humidities[0]   = ambientData.primary.humidities[0];
-    currentSensorData.primary.pressures[0]    = ambientData.primary.pressures[0];
-    currentSensorData.primary.validReadings   = ambientData.primary.validReadings;
+    if(needsAmbientRead && needsParallelRead){
+        currentSensorData.primary.temperatures[0]   = ambientData.primary.temperatures[0];
+        currentSensorData.primary.humidities[0]     = ambientData.primary.humidities[0];
+        currentSensorData.primary.pressures[0]      = ambientData.primary.pressures[0];
+        currentSensorData.primary.validReadings     = ambientData.primary.validReadings;
 
-    currentSensorData.secondary.temperatures[0] = ambientData.secondary.temperatures[0];
-    currentSensorData.secondary.humidities[0]   = ambientData.secondary.humidities[0];
-    currentSensorData.secondary.pressures[0]    = ambientData.secondary.pressures[0];
-    currentSensorData.secondary.validReadings   = ambientData.secondary.validReadings;
+        currentSensorData.secondary.temperatures[0] = ambientData.secondary.temperatures[0];
+        currentSensorData.secondary.humidities[0]   = ambientData.secondary.humidities[0];
+        currentSensorData.secondary.pressures[0]    = ambientData.secondary.pressures[0];
+        currentSensorData.secondary.validReadings   = ambientData.secondary.validReadings;
 
-    //dltas
-    currentSensorData.delta_temp = ambientData.primary.temperatures[0] - ambientData.secondary.temperatures[0];
-    currentSensorData.delta_hum  = ambientData.primary.humidities[0]   - ambientData.secondary.humidities[0];
-    currentSensorData.delta_pres = ambientData.primary.pressures[0]    - ambientData.secondary.pressures[0];
-
+        //dltas
+        currentSensorData.delta_temp = ambientData.primary.temperatures[0] - ambientData.secondary.temperatures[0];
+        currentSensorData.delta_hum  = ambientData.primary.humidities[0]   - ambientData.secondary.humidities[0];
+        currentSensorData.delta_pres = ambientData.primary.pressures[0]    - ambientData.secondary.pressures[0];
+    }
     bool ready = true;
 
     if(!ready){
@@ -586,20 +770,12 @@ bool performSampling(){
         return false;
     }
 
-    if(sensors.isCalibrating()){
-        char buf[128];
-        snprintf(buf, sizeof(buf), "calib ok prog=%.2f prim_complete=%d sec_complete=%d vP=%d vS=%d",
-            sensors.getCalibrationProgress(),
-            currentSensorData.primary.complete,
-            currentSensorData.secondary.complete,
-            currentSensorData.primary.validReadings,
-            currentSensorData.secondary.validReadings);
-        logger.logCalibDebug(String(buf));
-    }
-
     ml.addToWindow(currentSensorData);
 
-    //log
+    //prediction label
+    if(display.getMode() == DISPLAY_MODE_PREDICTION){
+        logger.setActiveLabel(LOG_LABEL_PRED);
+    }
     if(loggingActive){
         logger.logEntry(currentSensorData, currentPrediction.valid ? &currentPrediction : nullptr);
     }
@@ -610,7 +786,7 @@ bool performSampling(){
     }
 
     DEBUG_VERBOSE_PRINTF("[Sample] T:%.1f H:%.1f G:%.0f\n", 
-        currentSensorData.primary.temperatures,
+        currentSensorData.primary.temperatures[0],
         currentSensorData.primary.humidities[0],
         currentSensorData.primary.gas_resistances[0]
     );
@@ -637,6 +813,16 @@ void performInference(){
             DEBUG_PRINTLN(F("[ALERT] Anomalous scent detected!"));
         }
     }
+}
+
+bool performTemporalEnsembleInference(){
+    if(currentState==STATE_TEMPORAL_COLLECTING){
+        return false;
+
+    }
+
+    enterState(STATE_TEMPORAL_COLLECTING);
+    return true;
 }
 
 //===========================================================================================================
@@ -740,22 +926,36 @@ void handleButtons(){
                     currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
                     display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
                     display.refresh();
-                    performInference();
-                    updateDisplay();
+                    logger.setActiveLabel(LOG_LABEL_PRED);
+
+                    if(ml.getInferenceMode()==INFERENCE_MODE_TEMPORAL){
+                        performTemporalEnsembleInference();
+                    }
+                    else{
+                        ml.runActiveInference(currentPrediction);
+                        updateDisplay();
+                    }
                     break;
                 }
                 case 1:{
-                    ml.nextModel();
-                    currentPrediction.valid = false;
-                    currentPrediction.confidence = 0.0f;
-                    currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
+                    //cycle
+                    if(ml.getInferenceMode()==INFERENCE_MODE_SINGLE){
+                        ml.nextModel();
+                    }
+                    else{
+                        ml.cycleInferenceMode();
+                        snprintf(settingsLabelInfMode, sizeof(settingsLabelInfMode), "Infer: %s", ml.getInferenceModeName());
+                    }
+                    currentPrediction.valid=false;
                     display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
                     display.refresh();
-                    performInference();
-                    updateDisplay();
                     break;
                 }
                 default:
+                    //
+                    if(!collectingLabeled){
+                        logger.setActiveLabel(LOG_LABEL_AMBIENT);
+                    }
                     display.setMode(DISPLAY_MODE_MENU);
                     display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
                     updateDisplay();
@@ -841,7 +1041,7 @@ void handleBLE(){
 
         //apply config here
         if(cfg.startsWith("CALIB")){
-            enterState(STATE_CALIBRATING);
+            enterState(STATE_ML_BASELINE_CALIB);
         }
         else if(cfg.startsWith("LOG:ON")){
             loggingActive = false;
@@ -892,11 +1092,21 @@ void updateDisplay(){
             break;
 
         case DISPLAY_MODE_PREDICTION:
-            display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
+            if(currentState==STATE_TEMPORAL_COLLECTING){
+                //show live progress
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "Collecting %d/%d...",ml.getTemporalCount(), ml.getTemporalBufferSize());display.showPredictionScreen(currentPrediction, currentSensorData, buffer);
+            }
+            else{
+                display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
+            }
             break;
 
         case DISPLAY_MODE_CALIBRATION:
-            if(sensors.isCalibrating()){    
+            if(currentState == STATE_ML_BASELINE_CALIB){
+                display.showCalibrationScreen(ml.getBaselineCalibrationProgress(), "Ambient Baseline...");
+            }
+            else if(sensors.isCalibrating()){
                 display.showCalibrationScreen(sensors.getCalibrationProgress(), "Calibrating...");
             }
             else{
@@ -942,8 +1152,15 @@ void menuActionShowSensorData(){
 
 void menuActionShowPrediction(){
     predictionSelection = 0;
+
     display.setPredictionSelection(predictionSelection);
     display.setMode(DISPLAY_MODE_PREDICTION);
+
+    logger.setActiveLabel(LOG_LABEL_PRED);
+    if(!logger.isLogging()){
+        logger.startLogging();
+        loggingActive = true;
+    }
 }
 
 void menuActionShowGraph(){
@@ -961,7 +1178,7 @@ void menuActionDataCollection(){
 
 void menuActionCalibrate(){
     if(currentState != STATE_ERROR){
-        enterState(STATE_CALIBRATING);
+        enterState(STATE_ML_BASELINE_CALIB);
         display.setMode(DISPLAY_MODE_CALIBRATION);
     }
 }
@@ -974,6 +1191,15 @@ void menuActionSettings(){
 //===========================================================================================================
 //settings menu actions
 //===========================================================================================================
+void settingsActionCycleInferenceMode(){
+    ml.cycleInferenceMode();
+    currentInferenceMode= ml.getInferenceMode();
+    snprintf(settingsLabelInfMode, sizeof(settingsLabelInfMode),
+    "Inf: %s",ml.getInferenceModeName());
+    
+    DEBUG_PRINTF("[Settings] Inference mode set to %s\n", ml.getInferenceModeName());
+    refreshSettingsMenu();
+}
 
 void refreshSettingsMenu(){
     display.showMenu(settings_menu_items, SETTINGS_MENU_COUNT, display.getSelectedMenuIndex(), "Settings");

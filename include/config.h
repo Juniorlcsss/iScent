@@ -60,11 +60,11 @@
 #define BME688_NUM_HEATER_STEPS 10
 #define BME688_HEATER_DURATION 100 //ms
 
-//heater profile defaults (get from ai studio)
-static const uint16_t DEFAULT_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {200, 220, 240, 260, 280, 300, 320, 340, 360, 380};
-static const uint16_t DEFAULT_HEATER_DURATIONS[BME688_NUM_HEATER_STEPS] = {100, 100, 100, 100, 100, 100, 100, 100, 100, 100};
-static const uint16_t VOC_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {250, 260, 270, 280, 290, 300, 310, 320, 330, 340};
-static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {300, 320, 340, 360, 380, 400, 420, 440, 460, 480};
+//heater profile defaults tuned for tea VOC range (higher temps 360–400C)
+static const uint16_t DEFAULT_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {360, 365, 370, 375, 380, 385, 390, 395, 400, 400};
+static const uint16_t DEFAULT_HEATER_DURATIONS[BME688_NUM_HEATER_STEPS] = {120, 120, 120, 120, 120, 120, 120, 120, 120, 120};
+static const uint16_t VOC_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {330, 340, 350, 360, 370, 380, 390, 395, 400, 400};
+static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {320, 340, 360, 380, 400, 420, 440, 460, 480, 480};
 
 //sampling config
 #define BME688_SAMPLE_RATE 3000
@@ -94,7 +94,7 @@ typedef enum{
 //machine learning config
 //===========================================================================================================
 //paraeters for edge
-#define ML_CONFIDENCE_THRESHOLD 0.70f
+#define ML_CONFIDENCE_THRESHOLD 0.60f
 #define ML_INFERENCE_INTERVAL_MS 2000
 #define ML_ANOMALY_THRESHOLD 0.30f
 #define ML_SAMPLES 10
@@ -105,12 +105,12 @@ typedef enum{
 #define ML_SENSOR_COUNT 2
 #define ML_MODEL_PATH
 #define ML_STRIDE 5
-#define ML_HEATER_STEPS 10
+#define ML_HEATER_STEPS 1
 
 //total features
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
-#define ML_DELTA_FEATURES (ML_FEATURE_COUNT)
-#define TOTAL_ML_FEATURES (ML_RAW_FEATURES * ML_SENSOR_COUNT + ML_DELTA_FEATURES)
+#define ML_DELTA_FEATURES 4 //delta_temp, delta_hum, delta_pres, log_gas_cross
+#define TOTAL_ML_FEATURES 8
 
 //tea classification labels
 typedef enum {
@@ -144,6 +144,21 @@ static const char* SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
     "raspberry",
     "sweet cherry"
 };
+typedef enum{
+    INFERENCE_MODE_SINGLE= 0,
+    INFERENCE_MODE_ENSEMBLE,
+    INFERENCE_MODE_TEMPORAL,
+    INFERENCE_MODE_COUNT,
+}inference_mode_t;
+
+static const char* INFERENCE_MODE_NAMES[] ={
+    "Single",
+    "Temporal",
+    "Ensemble"
+};
+
+#define TEMPOERAL_COLLECTION_INTERVAL_MS 200
+#define TEMPORAL_TIMEOUT_MS 15000
 
 //===========================================================================================================
 //data logging config
@@ -201,8 +216,11 @@ typedef enum{
     STATE_WARMUP,
     STATE_IDLE,
     STATE_CALIBRATING,
+    STATE_ML_BASELINE_CALIB,
     STATE_SAMPLING,
     STATE_INFERENCING,
+    STATE_ENSEMBLE_INFERENCING,
+    STATE_TEMPORAL_COLLECTING,
     STATE_LOGGING,
     STATE_BLE_CONNECTED,
     STATE_SLEEP,

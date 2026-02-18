@@ -19,6 +19,11 @@ typedef struct{
     int16_t label; //-1 for none
 } log_entry_t;
 
+//labels
+static const int16_t LOG_LABEL_CALIBRATION = -2;
+static const int16_t LOG_LABEL_AMBIENT = -3;
+static const int16_t LOG_LABEL_PRED = -4;
+
 class DataLogger {
 public:
     DataLogger();

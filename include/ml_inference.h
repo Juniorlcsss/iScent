@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "config.h"
 #include "bme688_handler.h"
+#include "baseline_calibration.h"
 
 // Detect Edge Impulse assets without pulling in the full implementation here
 #if !defined(EI_CLASSIFIER)
@@ -65,6 +66,41 @@ typedef struct{
     uint32_t timestamp;
 } ml_training_sample_t;
 
+
+typedef struct{
+    scent_class_t predictedClass;
+    float confidence;
+    float classScores[SCENT_CLASS_COUNT];
+
+    //
+    scent_class_t dtClass;
+    float dtConf;
+    scent_class_t knnClass;
+    float knnConf;
+    scent_class_t rfClass;
+    float rfConf;
+    //
+
+
+    uint32_t inferenceTimeMs;
+    uint32_t timestamp;
+    bool valid;
+} ml_ensemble_prediction_t;
+
+typedef struct{
+    bool active;
+    uint8_t targetSamples;
+    uint8_t collectedSamples;
+    uint8_t failedAttempts;
+    uint8_t maxFailedAttempts;
+
+    uint32_t startTimeMs;
+    uint32_t timeoutMs;
+    uint32_t lastUpdateTimeMs;
+}temporal_state_t;
+
+
+
 class MLInference{
 public:
     MLInference();
@@ -73,25 +109,36 @@ public:
     //===========================================================================================================
     //init
     //===========================================================================================================
-    bool begin();//
-    bool isReady() const;//
+    bool begin();
+    bool isReady() const;
 
     //===========================================================================================================
     //feature extraction
     //===========================================================================================================
-    bool extractFeatures(const dual_sensor_data_t &data);//
-    bool addToWindow(const dual_sensor_data_t &data);//
-    void clearFeatureBuffer();//
-    bool isFeatureBufferReady() const;//
+    bool extractFeatures(const dual_sensor_data_t &data);
+    bool addToWindow(const dual_sensor_data_t &data);
+    void clearFeatureBuffer();
+    bool isFeatureBufferReady() const;
 
-    const char* getClassName(scent_class_t classId) const;//
-    scent_class_t getClassFromName(const char* name) const;//
+    const char* getClassName(scent_class_t classId) const;
+    scent_class_t getClassFromName(const char* name) const;
+    
+    //===========================================================================================================
+    //baseline calibration
+    //===========================================================================================================
+    void startBaselineCalibration(uint16_t sample_count = 10);
+    void updateBaselineCalibration(const dual_sensor_data_t &data);
+    bool isBaselineCalibrationComplete() const;
+    float getBaselineCalibrationProgress() const;
+    void setManualBaseline(const baseline_t& baseline);
+    const baseline_t& getBaseline() const;
+    bool isBaselineValid() const;
     
     //===========================================================================================================
     //inference
     //===========================================================================================================
-    bool runInference(ml_prediction_t &pred);//
-    bool runInferenceOnData(const dual_sensor_data_t &data, ml_prediction_t &pred);//
+    bool runInference(ml_prediction_t &pred);
+    bool runInferenceOnData(const dual_sensor_data_t &data, ml_prediction_t &pred);
 
     //===========================================================================================================
     //model selection
@@ -108,7 +155,7 @@ public:
     void setDataCollectionMode(bool enabled);
     bool isDataCollectionMode() const;
 
-    void setCurrentLabel(scent_class_t label);//
+    void setCurrentLabel(scent_class_t label);
     bool collectSample(const dual_sensor_data_t &data);
     uint32_t getCollectedSampleCount() const;
     void clearCollectedSamples();
@@ -132,9 +179,51 @@ public:
     //===========================================================================================================
     //export
     //===========================================================================================================
-    void printModelInfo();//
+    void printModelInfo();
     void printPrediction(const ml_prediction_t &pred);
     String getPredictionJSON(const ml_prediction_t &pred);
+    void printFeatureDebug() const;
+
+    //===========================================================================================================
+    //ensemble
+    //===========================================================================================================
+    bool runEnsembleInference(ml_ensemble_prediction_t &pred);
+
+    void setInferenceMode(inference_mode_t mode);
+    inference_mode_t getInferenceMode() const;
+    const char* getInferenceModeName() const;
+    void cycleInferenceMode();
+
+    /*
+    - SINGLE: runInference()
+    - ENSEMBLE: runEnsembleInference()
+    - TEMPORAL: use state machine
+    */
+
+    bool runActiveInference(ml_prediction_t &pred);
+    static void ensembleToPrediction(const ml_ensemble_prediction_t &ens, ml_prediction_t &pred);
+
+
+    //===========================================================================================================
+    //temporal
+    //===========================================================================================================
+    void startTemporalCollection(uint8_t targetSamples=0);
+    bool updateTemporalCollection(ml_prediction_t &pred);
+    bool isTemporalCollectionActive() const;
+    bool isTemporalCollectionComplete() const;
+    float getTemporalCollectionProgress() const;
+    void cancelTemporalCollection();
+    void finaliseTemporalPrediction(ml_prediction_t &pred);
+
+    //===========================================================================================================
+    //temporal buffer
+    //===========================================================================================================
+    void resetTemporalBuffer();
+    bool addToTemporalEnsemble(const ml_ensemble_prediction_t &pred);
+    scent_class_t getTemporalPrediction(float &confidence) const;
+    uint8_t getTemporalCount() const {return _temporal_count;}
+    uint8_t getTemporalBufferSize() const {return TEMPORAL_BUFFER_SIZE;}
+
 
 private:
 
@@ -142,6 +231,11 @@ private:
     //vals
     //===========================================================================================================
     ml_feature_buffer_t _feature_buffer;
+    inference_mode_t _inference_mode;
+    temporal_state_t _temporal_state;
+    
+    //baseline calibration
+    BaselineCalibration _baseline_calibration;
 
     //window
     uint16_t _window_index;
@@ -177,10 +271,18 @@ private:
     ml_training_sample_t *_training_samples;
     uint16_t _training_sample_count;
 
+
+
+    //temporal buffer
+    static const uint8_t TEMPORAL_BUFFER_SIZE=10;
+    float _temporal_scores[SCENT_CLASS_COUNT];
+    uint8_t _temporal_count;
+    
+
     //===========================================================================================================
     //methods
     //===========================================================================================================
-    void normaliseFeatures();
+    void normaliseFeatures(ml_feature_buffer_t& features, const baseline_t& baseline);
     void computeStats(float *data, const float *window, uint16_t size);
     void extractGasFeatures(float *output, const float window[][BME688_NUM_HEATER_STEPS], uint16_t size);
 

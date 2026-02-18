@@ -468,7 +468,13 @@ String DataLogger::generateFilename(){
     const char* baseName = (DATA_LOG_FILENAME[0] == '/') ? DATA_LOG_FILENAME + 1 : DATA_LOG_FILENAME;
 
     String suffix;
-    if(_active_label >= SCENT_CLASS_PURE_CAMOMILE && _active_label < SCENT_CLASS_COUNT){
+    if(_active_label == LOG_LABEL_CALIBRATION){
+        suffix = "calibration";
+    }
+    else if(_active_label == LOG_LABEL_AMBIENT){
+        suffix = "ambient";
+    }
+    else if(_active_label >= SCENT_CLASS_PURE_CAMOMILE && _active_label < SCENT_CLASS_COUNT){
         suffix = sanitizeLabel(SCENT_CLASS_NAMES[_active_label]);
     }
 
@@ -531,7 +537,13 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     _log_file.printf("%lu,",entry.timestamp);
 
     //label
-    if(entry.label >= 0 && entry.label < SCENT_CLASS_COUNT){
+    if(entry.label == LOG_LABEL_CALIBRATION){
+        _log_file.print("calibration,");
+    }
+    else if(entry.label == LOG_LABEL_AMBIENT){
+        _log_file.print("ambient,");
+    }
+    else if(entry.label >= 0 && entry.label < SCENT_CLASS_COUNT){
         _log_file.printf("%s,", SCENT_CLASS_NAMES[entry.label]);
     }else{
         _log_file.print("None,");
@@ -708,16 +720,13 @@ bool DataLogger::deleteAllLogFiles(){
         }
         String name = stripLeadingSlash(String(file.name()));
 
-        if(name.startsWith(base)){
+        // delete any log file matching the base, plus calib debug
+        if(name.startsWith(base) ||name.equalsIgnoreCase(stripLeadingSlash(String(CALIB_DEBUG_FILE)))){
             String path = normalisePath(name);
             String fsPath = _using_sd ? toFsPath(path) : path;
-            if(_using_sd){
-                SD.remove(fsPath.c_str());
-            }
-            else{
-                LittleFS.remove(fsPath);
-            }
-            DEBUG_PRINTF("[DataLogger] Deleted log file %s\n", name.c_str());
+            bool removed = _using_sd ? SD.remove(fsPath.c_str()) : LittleFS.remove(fsPath);
+
+            DEBUG_PRINTF("[DataLogger] %s %s\n", removed ? "Deleted" : "Failed to delete", name.c_str());
         }
         file.close();
     }
@@ -725,10 +734,16 @@ bool DataLogger::deleteAllLogFiles(){
     if(dir){
         dir.close();
     }
-    
 
-    _file_index =0;
+    _file_index = 0;
     _total_entries = 0;
+    _current_filename = "";
+    _buffer_head = 0;
+    _buffer_count = 0;
+    _is_logging = false;
+
+    String defaultFile = String(DATA_LOG_FILENAME) + ".csv";
+    ensureFileExists(defaultFile.c_str());
     return true;
 }
 

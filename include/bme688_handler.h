@@ -154,6 +154,8 @@ public:
     bool startCalibration(uint16_t samples = BME688_GAS_BASE_SAMPLES);
     bool isCalibrating() const;
     float getCalibrationProgress() const;
+    uint16_t getCalibrationCollected() const;
+    uint16_t getCalibrationTarget() const;
     bool finishCalibration();
 
 

@@ -1,5 +1,7 @@
 #include "ml_inference.h"
 #include <LittleFS.h>
+#include <ctype.h>
+#include "model headers/feature_stats.h"
 
 #if EI_CLASSIFIER
 #include "iScent_inferencing.h"
@@ -22,7 +24,9 @@ MLInference::MLInference():
     _active_model(ML_MODEL_EDGE_IMPULSE),
     _model_names{"Edge Impulse", "Decision Tree", "KNN", "Random Forest"},
     _training_samples(nullptr),
-    _training_sample_count(0)
+    _training_sample_count(0),
+    _temporal_count(0),
+    _inference_mode(INFERENCE_MODE_SINGLE)
 {
     memset(_model_available, 0, sizeof(_model_available));
     memset(&_feature_buffer,0,sizeof(_feature_buffer));
@@ -34,6 +38,8 @@ MLInference::MLInference():
     memset(_windowHumS,0,sizeof(_windowHumS));
     memset(_windowPresS,0,sizeof(_windowPresS));
     memset(_windowGasS,0,sizeof(_windowGasS));
+    memset(_temporal_scores, 0, sizeof(_temporal_scores));
+    memset(&_temporal_state,0,sizeof(_temporal_state));
 }
 
 MLInference::~MLInference(){
@@ -88,35 +94,26 @@ bool MLInference::isReady() const{
 //feature extraction
 //===========================================================================================================
 
-bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data){
+bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data) {
     uint16_t idx = 0;
-
-    //clear
     memset(_feature_buffer.features, 0, sizeof(_feature_buffer.features));
 
-    //*Primary sensor features
+    // Store RAW values — normaliseFeatures will transform them
     _feature_buffer.features[idx++] = sensor_data.primary.temperatures[0];
     _feature_buffer.features[idx++] = sensor_data.primary.humidities[0];
     _feature_buffer.features[idx++] = sensor_data.primary.pressures[0];
     _feature_buffer.features[idx++] = sensor_data.primary.gas_resistances[0];
-
-    //*Secondary sensor features
     _feature_buffer.features[idx++] = sensor_data.secondary.temperatures[0];
     _feature_buffer.features[idx++] = sensor_data.secondary.humidities[0];
     _feature_buffer.features[idx++] = sensor_data.secondary.pressures[0];
     _feature_buffer.features[idx++] = sensor_data.secondary.gas_resistances[0];
 
-    //delta
-    _feature_buffer.features[idx++] = sensor_data.delta_temp;
-    _feature_buffer.features[idx++] = sensor_data.delta_hum;
-    _feature_buffer.features[idx++] = sensor_data.delta_pres;
-    _feature_buffer.features[idx++] = sensor_data.delta_gas_avg;
-
     _feature_buffer.featureCount = idx;
+    
+    // Transform raw → environment-invariant features + z-score
+    normaliseFeatures(_feature_buffer, _baseline_calibration.getBaseline());
+    
     _feature_buffer.ready = true;
-
-    DEBUG_PRINTF("[MLInference] Extracted %d features\n", idx);
-
     return true;
 }
 
@@ -189,11 +186,39 @@ const char* MLInference::getClassName(scent_class_t classId) const{
 }
 
 scent_class_t MLInference::getClassFromName(const char* name) const{
-    for(int i=0; i<SCENT_CLASS_COUNT; i++){
-        if(strcmp(name, SCENT_CLASS_NAMES[i])==0){
-            return (scent_class_t)i;
+    if(name == nullptr){
+        return SCENT_CLASS_UNKNOWN;
+    }
+
+    auto normalizeSimple = [](const char* src, char* dst, size_t dstSize){
+        size_t len = strlen(src);
+        size_t start = 0;
+        while(start < len && isspace((unsigned char)src[start])){
+            start++;
         }
 
+        size_t end = len;
+        while(end > start && isspace((unsigned char)src[end - 1])){
+            end--;
+        }
+
+        size_t out = 0;
+        for(size_t i = start;i < end&&out +1<dstSize; i++){
+            dst[out++] = (char)tolower((unsigned char)src[i]);
+        }
+
+        dst[out] = '\0';
+    };
+
+    char target[64];
+    normalizeSimple(name, target, sizeof(target));
+
+    for(int i = 0; i < SCENT_CLASS_COUNT; i++){
+        char candidate[64];
+        normalizeSimple(SCENT_CLASS_NAMES[i], candidate, sizeof(candidate));
+        if(strcmp(target, candidate) == 0){
+            return static_cast<scent_class_t>(i);
+        }
     }
     return SCENT_CLASS_UNKNOWN;
 }   
@@ -714,3 +739,481 @@ void MLInference::resetStats(){
     _total_inference_time_ms =0;
 }
 
+
+//===========================================================================================================
+//inference mode management
+//===========================================================================================================
+void MLInference::setInferenceMode(inference_mode_t mode){
+    if(mode>= INFERENCE_MODE_COUNT){
+        mode = INFERENCE_MODE_SINGLE;
+    }
+    _inference_mode = mode;
+
+    DEBUG_PRINTF("[MLInference] Inference mode set to %d\n", mode);
+}
+
+inference_mode_t MLInference::getInferenceMode() const{
+    return _inference_mode;
+}
+
+const char* MLInference::getInferenceModeName()const{
+    return INFERENCE_MODE_NAMES[_inference_mode];
+}
+
+void MLInference::cycleInferenceMode(){
+    _inference_mode = (inference_mode_t)((_inference_mode + 1) % INFERENCE_MODE_COUNT);
+    DEBUG_PRINTF("[MLInference] Inference mode changed to %s\n", getInferenceModeName());
+}
+
+//===========================================================================================================
+//inferenceing
+//===========================================================================================================
+
+bool MLInference::runActiveInference(ml_prediction_t &pred){
+    switch(_inference_mode){
+        case INFERENCE_MODE_SINGLE:
+            return runInference(pred);
+
+        case INFERENCE_MODE_ENSEMBLE:{
+            ml_ensemble_prediction_t ensP;
+            if(!runEnsembleInference(ensP)){
+                pred.valid = false;
+                return false;
+            }
+            ensembleToPrediction(ensP, pred);
+
+            //apply conf
+            if(pred.confidence < _confidence_threshold){
+                pred.predictedClass=SCENT_CLASS_UNKNOWN;
+                pred.isAnomalous = true;
+                pred.anomalyScore = 1.0f - pred.confidence;
+            }
+            return true;
+        }
+
+        case INFERENCE_MODE_TEMPORAL:{
+            ml_ensemble_prediction_t ensPred;
+            if(!runEnsembleInference(ensPred)){
+                pred.valid = false;
+                return false;
+            }
+            ensembleToPrediction(ensPred, pred);
+            return true;
+
+        }
+            
+        default:
+            pred.valid = false;
+            return false;
+    }
+}
+
+
+//===========================================================================================================
+//ens to pred
+//===========================================================================================================
+void MLInference::ensembleToPrediction(const ml_ensemble_prediction_t &ens, ml_prediction_t &pred){
+    memset(&pred,0,sizeof(pred));
+    pred.timestamp = ens.timestamp;
+    pred.inferenceTimeMs = ens.inferenceTimeMs;
+    pred.valid = ens.valid;
+    pred.confidence = ens.confidence;
+    pred.predictedClass = ens.predictedClass;
+    pred.isAnomalous = (ens.confidence < ML_CONFIDENCE_THRESHOLD);
+    pred.anomalyScore= pred.isAnomalous ?(1.0f-ens.confidence) :0.0f;
+
+
+    //normalise scores to confidences
+    float total = 0.0f;
+    for(int i=0; i<SCENT_CLASS_COUNT;i++){
+        total+= ens.classScores[i];
+    }
+
+    for(int i=0; i<ML_CLASS_COUNT; i++){
+        if(i<SCENT_CLASS_COUNT&&total>0.0f){
+            pred.classConfidences[i] =ens.classScores[i]/total;
+        }
+        else{
+            pred.classConfidences[i] = 0.0f;
+        }
+
+    }
+}
+//===========================================================================================================
+//temporal
+//===========================================================================================================
+void MLInference::startTemporalCollection(uint8_t samples){
+    resetTemporalBuffer();
+
+    _temporal_state.active = true;
+    _temporal_state.targetSamples= (samples > 0 )?samples:TEMPORAL_BUFFER_SIZE;
+    _temporal_state.collectedSamples = 0;
+    _temporal_state.startTimeMs=millis();
+    _temporal_state.failedAttempts=0;
+    _temporal_state.maxFailedAttempts=_temporal_state.targetSamples*3;
+    _temporal_state.lastUpdateTimeMs=0;
+    _temporal_state.timeoutMs=TEMPORAL_TIMEOUT_MS;
+
+    DEBUG_PRINTF("[MLInference] Started temporal collection for %d samples\n", _temporal_state.targetSamples);
+}
+
+bool MLInference::updateTemporalCollection(ml_prediction_t &pred){
+    if(!_temporal_state.active){
+        DEBUG_PRINTLN(F("[MLInference] Temporal collection not active"));
+        return false;
+    }
+    uint32_t time=millis();
+
+    if(time- _temporal_state.startTimeMs> _temporal_state.timeoutMs){
+        DEBUG_PRINTLN(F("[MLInference] Temporal collection timed out"));
+        _temporal_state.active = false;
+        finaliseTemporalPrediction(pred);
+        return true;
+    }
+
+    //check for max faulure
+    if(_temporal_state.failedAttempts>= _temporal_state.maxFailedAttempts){
+        DEBUG_PRINTLN(F("[MLInference] Temporal collection stopped due to too many failed attempts"));
+        _temporal_state.active = false;
+        finaliseTemporalPrediction(pred);
+        return true;
+    }
+
+    //rate limit
+    if((time-_temporal_state.lastUpdateTimeMs)<TEMPOERAL_COLLECTION_INTERVAL_MS){
+        return false;
+    }
+
+    //run inference
+    ml_ensemble_prediction_t ePred;
+    if(!runEnsembleInference(ePred)){
+        _temporal_state.failedAttempts++;
+        _temporal_state.lastUpdateTimeMs = time;
+        return false;
+    }
+
+    //ad dto buffer
+    if(addToTemporalEnsemble(ePred)){
+        _temporal_state.active = false;
+        finaliseTemporalPrediction(pred);
+
+        DEBUG_PRINTLN(F("[MLInference] Temporal collection complete"));
+        return true;
+    }
+
+    _temporal_state.collectedSamples = _temporal_count;
+    _temporal_state.lastUpdateTimeMs = time;
+
+    //update running best pred
+    float tempConf=0.0f;
+    scent_class_t tempClass = getTemporalPrediction(tempConf);
+    pred.predictedClass=tempClass;
+    pred.confidence = tempConf;
+    pred.valid = (_temporal_count>0);
+    pred.timestamp=time;
+
+    return false;//not complete yet
+}
+
+bool MLInference::isTemporalCollectionActive()const{
+    return _temporal_state.active;
+}
+
+bool MLInference::isTemporalCollectionComplete()const{
+    return (!_temporal_state.active&&(_temporal_count >0));
+}
+
+float MLInference::getTemporalCollectionProgress()const{
+    if(!_temporal_state.active &&_temporal_count==0){
+        return 0.0f;
+    }
+    if(_temporal_state.targetSamples==0){
+        return 1.0f;
+    }
+
+    return (float)_temporal_count / (float)_temporal_state.targetSamples;
+}
+
+void MLInference::cancelTemporalCollection(){
+    _temporal_state.active=false;
+    DEBUG_PRINTLN(F("[MLInference] Temporal collection cancelled"));
+    resetTemporalBuffer();
+}
+
+
+void MLInference::finaliseTemporalPrediction(ml_prediction_t &finalPred){
+    memset(&finalPred, 0,sizeof(finalPred));
+
+    finalPred.timestamp=millis();
+
+    float conf=0.0f;
+    scent_class_t sClass = getTemporalPrediction(conf);
+    finalPred.predictedClass=sClass;
+    finalPred.confidence=conf;
+    finalPred.valid = (_temporal_count >0);
+    finalPred.isAnomalous=(sClass==SCENT_CLASS_UNKNOWN);
+    finalPred.anomalyScore = finalPred.isAnomalous ? (1.0f - conf) : 0.0f;
+
+    DEBUG_PRINTF("[MLInference] Final temporal prediction: %s (confidence: %.2f%%)\n",getClassName(sClass), conf * 100.0f);
+
+}
+
+//===========================================================================================================
+//temporal buffer
+//===========================================================================================================
+void MLInference::resetTemporalBuffer(){
+    memset(_temporal_scores,0,sizeof(_temporal_scores));
+    _temporal_count = 0;
+}
+
+bool MLInference::addToTemporalEnsemble(const ml_ensemble_prediction_t &pred){
+    if(!pred.valid){
+        return false;
+    }
+
+    for(int i=0; i<SCENT_CLASS_COUNT; i++){
+        _temporal_scores[i] += pred.classScores[i];
+    }
+    _temporal_count++;
+
+    DEBUG_PRINTF("[MLInference] Added to temporal ensemble, count: %d\n", _temporal_count);
+
+    return (_temporal_count >= TEMPORAL_BUFFER_SIZE);
+}
+
+scent_class_t MLInference::getTemporalPrediction(float &conf)const{
+    if(_temporal_count == 0){
+        conf=0;
+        return SCENT_CLASS_UNKNOWN;
+    }
+
+    float bScore=0.0f;
+    uint8_t bIdx=0;
+    float total=0.0f;
+
+    for(int i=0; i<SCENT_CLASS_COUNT; i++){
+        total += _temporal_scores[i];
+        if(_temporal_scores[i] > bScore){
+            bScore = _temporal_scores[i];
+            bIdx = i;
+        }
+    }
+    conf = (total>0) ? (bScore / total) : 0.0f;
+
+    //check 2nd
+    float second = 0.0f;
+    for(int i=0; i<SCENT_CLASS_COUNT;i++){
+        if(i != bIdx && _temporal_scores[i] > second){
+            second = _temporal_scores[i];
+        }
+    }
+
+    float margin = bScore - second;
+    if(margin < 0.05f){ //margin lower than threshold
+        return SCENT_CLASS_UNKNOWN;
+    }
+
+    return (scent_class_t)bIdx;
+}
+
+//===========================================================================================================
+//ensemble inference
+//===========================================================================================================
+bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
+    memset(&pred,0, sizeof(pred));
+    pred.timestamp = millis();
+    if(!_init || !_feature_buffer.ready){
+        DEBUG_PRINTLN(F("[MLInference] Module not ready"));
+        pred.valid=false;
+        return false;
+    }
+
+    uint32_t start = micros();
+
+    //run all available models
+    float dtConf = 1.0f, knnConf = 1.0f, rfConf = 1.0f;
+    //dt
+#ifdef DT_HAS_CONFIDENCE
+    uint8_t dtCls = dt_predict_with_confidence(_feature_buffer.features, &dtConf);
+#else
+    uint8_t dtCls = dt_predict(_feature_buffer.features);
+#endif
+
+    //knn
+    uint8_t knnCls = knn_predict_with_confidence(_feature_buffer.features, &knnConf);
+
+    //rf
+    uint8_t rfCls = rf_predict_with_confidence(_feature_buffer.features, &rfConf);
+
+    pred.inferenceTimeMs = (micros() - start) / 1000;
+
+    //store results
+    pred.dtClass = (scent_class_t)dtCls;
+    pred.dtConf = dtConf;
+    pred.knnClass = (scent_class_t)knnCls;
+    pred.knnConf = knnConf;
+    pred.rfClass = (scent_class_t)rfCls;
+    pred.rfConf = rfConf;
+
+    //
+    memset(pred.classScores, 0 ,sizeof(pred.classScores));
+
+    //weight
+    const float DT_WEIGHT = 0.73f;
+    const float KNN_WEIGHT = 0.61f;
+    const float RF_WEIGHT = 0.81f;
+
+    if(dtCls<SCENT_CLASS_COUNT){
+        pred.classScores[dtCls ]+= dtConf * DT_WEIGHT;
+    }
+    if(knnCls<SCENT_CLASS_COUNT){
+        pred.classScores[knnCls] += knnConf * KNN_WEIGHT;
+    }
+    if(rfCls<SCENT_CLASS_COUNT){
+        pred.classScores[rfCls]+= rfConf * RF_WEIGHT;
+    }
+
+    //get best
+    float bScore = 0.0f;
+    uint8_t bClass= 0;
+    float total=0.0f;
+
+    for(int i=0; i<SCENT_CLASS_COUNT; i++){
+        total+= pred.classScores[i];
+        if(pred.classScores[i]>bScore){
+            bScore= pred.classScores[i];
+            bClass=i;
+
+        }
+    }
+    pred.predictedClass=(scent_class_t)bClass;
+    pred.confidence = (total>0) ? (bScore / total) : 0.0f;
+    pred.valid=true;
+
+    _total_inferences++;
+    _total_inference_time_ms+=pred.inferenceTimeMs;
+
+    return true;
+}
+
+
+//===========================================================================================================
+//baseline calibration
+//===========================================================================================================
+void MLInference::startBaselineCalibration(uint16_t sample_count) {
+    DEBUG_PRINTF("[MLInference] Starting baseline calibration with %d samples\n", sample_count);
+    _baseline_calibration.startCalibration(sample_count);
+}
+
+void MLInference::updateBaselineCalibration(const dual_sensor_data_t &data) {
+    if (_baseline_calibration.getState() == CALIB_STATE_COLLECTING) {
+        if (_baseline_calibration.update(data)) {
+            DEBUG_PRINTLN(F("[MLInference] Baseline calibration complete!"));
+            const baseline_t& baseline = _baseline_calibration.getBaseline();
+            DEBUG_PRINTF("[MLInference] Temp1: %.2f, Hum1: %.2f, Pres1: %.2f, Gas1: %.0f\n",
+                baseline.temp1_baseline, baseline.hum1_baseline, 
+                baseline.pres1_baseline, baseline.gas1_baseline);
+        }
+    }
+}
+
+bool MLInference::isBaselineCalibrationComplete() const {
+    return _baseline_calibration.isCalibrationComplete();
+}
+
+float MLInference::getBaselineCalibrationProgress() const {
+    return _baseline_calibration.getProgress();
+}
+
+void MLInference::setManualBaseline(const baseline_t& baseline) {
+    DEBUG_PRINTLN(F("[MLInference] Setting manual baseline"));
+    _baseline_calibration.setBaseline(baseline);
+}
+
+const baseline_t& MLInference::getBaseline() const {
+    return _baseline_calibration.getBaseline();
+}
+
+bool MLInference::isBaselineValid() const {
+    return _baseline_calibration.isValid();
+}
+
+//===========================================================================================================
+//normalisation
+//===========================================================================================================
+
+void MLInference::normaliseFeatures(ml_feature_buffer_t& features, const baseline_t& baseline) {
+    if (!baseline.valid) {
+        DEBUG_PRINTLN(F("[MLInference] Baseline not valid, skipping normalization"));
+        return;
+    }
+    
+    //raw values
+    float temp1_raw = features.features[0];
+    float hum1_raw  = features.features[1];
+    float pres1_raw = features.features[2];
+    float gas1_raw  = features.features[3];
+    float temp2_raw = features.features[4];
+    float hum2_raw  = features.features[5];
+    float pres2_raw = features.features[6];
+    float gas2_raw  = features.features[7];
+    
+    //gas ratios
+    float gas1_response = (baseline.gas1_baseline > 0) ? gas1_raw / baseline.gas1_baseline : 1.0f;
+    float gas2_response = (baseline.gas2_baseline > 0) ? gas2_raw / baseline.gas2_baseline : 1.0f;
+    
+    //cross-sensor gas ratio
+    float gas_cross_ratio = (gas2_raw > 0) ? gas1_raw / gas2_raw : 1.0f;
+    
+    //differentials
+    float gas_response_diff = gas1_response - gas2_response;
+    float delta_temp = temp1_raw - temp2_raw;
+    float delta_hum  = hum1_raw - hum2_raw;
+    float delta_pres = pres1_raw - pres2_raw;
+    
+    //Log cross-ratio
+    float log_gas_cross = logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f);
+    
+    features.features[0] = gas1_response;
+    features.features[1] = gas2_response;
+    features.features[2] = gas_cross_ratio;
+    features.features[3] = fabsf(gas1_response - gas2_response);
+    features.features[4] = fabsf(temp1_raw - temp2_raw);
+    features.features[5] = fabsf(hum1_raw - hum2_raw);
+    features.features[6] = fabsf(pres1_raw - pres2_raw);
+    features.features[7] = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
+    features.featureCount = 8;
+    
+    //z-score
+    for (int i = 0; i < 8; i++) {
+        if (FEATURE_STD[i] > 1e-6f) {
+            features.features[i] = (features.features[i] - FEATURE_MEAN[i]) / FEATURE_STD[i];
+        }
+    }
+    
+    features.ready = true;
+    DEBUG_PRINTLN(F("[MLInference] Applied environment-invariant feature transform"));
+}
+
+void MLInference::printFeatureDebug() const {
+    DEBUG_PRINTLN(F("\n=== Feature Debug ==="));
+    const char* names[] = {"gas1_resp","gas2_resp","gas_cross","gas_diff","d_temp","d_hum","d_pres","log_gas_cross"};
+    for (int i = 0; i < TOTAL_ML_FEATURES; i++) {
+        float raw = _feature_buffer.features[i];
+        DEBUG_PRINTF("  [%d] %s = %.4f (z-score: %.2f σ from mean)\n", 
+            i, names[i], raw, raw);
+    }
+    
+
+    bool ood = false;
+    for (int i = 0; i < TOTAL_ML_FEATURES; i++) {
+        if (fabsf(_feature_buffer.features[i]) > 3.0f) {
+            DEBUG_PRINTF("Feature %d is %.1f σ from training mean\n", 
+                i, _feature_buffer.features[i]);
+            ood = true;
+        }
+    }
+    if (ood) {
+        DEBUG_PRINTLN(F("WARNING: Some features are out-of-distribution"));
+    }
+}

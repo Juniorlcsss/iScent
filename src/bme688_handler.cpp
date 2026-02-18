@@ -2,7 +2,7 @@
 #include <LittleFS.h>
 
 #define CALIBRATION_FILE "/calibration.dat"
-#define SCAN_PROGRESS_GUARD_MS 500U
+#define SCAN_PROGRESS_GUARD_MS 1500U
 #define SCAN_EXTRA_TIMEOUT_MS 200U
 
 //for ratio
@@ -438,7 +438,12 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
 
     uint32_t lastProgressMs = millis();
     while(scan.validReadings < _current_profile.steps && millis() < timeout){
-        delayMicroseconds(perStepUs);
+        if(perStepUs>=1000U){
+            delay((perStepUs+999U) /1000U);
+        } 
+        else{
+            delayMicroseconds(perStepUs);
+        }
         yield();
 
         readings = sensor.fetchData();
@@ -466,7 +471,7 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
     }
 
     scan.complete = (scan.validReadings >= _current_profile.steps);
-    DEBUG_PRINTF("[BME688] Sensor scan complete. Valid readings: %d/%d\n", scan.validReadings, _current_profile.steps);
+    DEBUG_VERBOSE_PRINTF("[BME688] Sensor scan complete. Valid readings: %d/%d\n", scan.validReadings, _current_profile.steps);
     return scan.validReadings > 0;
 }
 
@@ -744,6 +749,14 @@ float BME688Handler::getCalibrationProgress() const {
         return _calibration_data.calibrated ? 1.0f : 0.0f;
     }
     return (float)_calibration_collected / _calibration_samples;
+}
+
+uint16_t BME688Handler::getCalibrationCollected() const {
+    return _calibration_collected;
+}
+
+uint16_t BME688Handler::getCalibrationTarget() const {
+    return _calibration_samples;
 }
 
 void BME688Handler::accumulateCalibrationData(const dual_sensor_data_t &data){
