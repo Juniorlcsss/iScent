@@ -4,6 +4,10 @@
 #include <cstring>
 #include <vector>
 #include <cmath>
+#include <fstream>
+#include <algorithm>
+
+
 #include "csv_loader.h"
 #include "dt.h"
 #include "knn.h"
@@ -16,7 +20,7 @@ void printMetrics(const ml_metrics_t& m, const char* modelName){
 
 void printConfusionMatrix(const ml_metrics_t &m){
     std::cout << "\nConfusion Matrix:"<<std::endl;
-    std::cout << "Predicted ->  ";
+    std::cout << "Predicted -> ";
     for(int i=0; i<SCENT_CLASS_COUNT; i++){
         std::cout << std::setw(4) << i;
     }
@@ -74,13 +78,152 @@ int main(int argc, char* argv[]){
     csv_training_sample_t *testSet = nullptr;
     uint16_t trainCount=0, testCount=0;
     loader.split(trainRatio, trainSet, trainCount, testSet, testCount);
+    std::cout << "\n=== Training Feature Statistics ===" << std::endl;
+    const char* fnames[] = {"gas1_resp","gas2_resp","gas_cross","gas_diff","d_temp","d_hum","d_pres","log_gas_cross"};
+
+    
+    //per class stats
+    for (int c = 0; c < SCENT_CLASS_COUNT; c++) {
+        std::vector<std::vector<float>> classFeatures(CSV_FEATURE_COUNT);
+        int classCount = 0;
+        
+        for (int i = 0; i < trainCount; i++) {
+            if (trainSet[i].label == c) {
+                classCount++;
+                for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+                    classFeatures[f].push_back(trainSet[i].features[f]);
+                }
+            }
+        }
+        
+        if (classCount == 0) continue;
+        
+        std::cout << "\nClass: " << CSVLoader::getClassName((scent_class_t)c) 
+                << " (" << classCount << " samples)" << std::endl;
+        for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+            float sum = 0;
+            for (float v : classFeatures[f]) sum += v;
+            float mean = sum / classFeatures[f].size();
+            
+            float varSum = 0;
+            for (float v : classFeatures[f]) varSum += (v - mean) * (v - mean);
+            float std = sqrt(varSum / classFeatures[f].size());
+            
+            float mn = *std::min_element(classFeatures[f].begin(), classFeatures[f].end());
+            float mx = *std::max_element(classFeatures[f].begin(), classFeatures[f].end());
+            
+            std::cout << "  " << std::setw(8) << fnames[f] 
+                    << ": mean=" << std::setw(10) << std::fixed << std::setprecision(4) << mean
+                    << " std=" << std::setw(10) << std << " min=" << std::setw(10) << mn 
+                    << " max=" << std::setw(10) << mx << std::endl;
+        }
+    }
+
+    //get global training stats
+    float feature_means[CSV_FEATURE_COUNT] = {0};
+    float feature_stds[CSV_FEATURE_COUNT] = {0};
+
+    for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+        double sum = 0;
+        for (int i = 0; i < trainCount; i++) {
+            sum += trainSet[i].features[f];
+        }
+        feature_means[f] = sum / trainCount;
+        
+        double varSum = 0;
+        for (int i = 0; i < trainCount; i++) {
+            double diff = trainSet[i].features[f] - feature_means[f];
+            varSum += diff * diff;
+        }
+        feature_stds[f] = sqrt(varSum / trainCount);
+        if (feature_stds[f] < 1e-6f) feature_stds[f] = 1.0f; // prevent division by zero
+    }
+
+    //apply z-score
+    for (int i = 0; i < trainCount; i++) {
+        for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+            trainSet[i].features[f] = (trainSet[i].features[f] - feature_means[f]) / feature_stds[f];
+        }
+    }
+    for (int i = 0; i < testCount; i++) {
+        for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+            testSet[i].features[f] = (testSet[i].features[f] - feature_means[f]) / feature_stds[f];
+        }
+    }
+
+    //save to feature_stats
+    std::ofstream statsFile("feature_stats.h");
+    statsFile << "#ifndef FEATURE_STATS_H\n#define FEATURE_STATS_H\n\n";
+    statsFile << "static const float FEATURE_MEANS[" << CSV_FEATURE_COUNT << "] = {";
+    for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+        statsFile << std::setprecision(8) << feature_means[f];
+        if (f < CSV_FEATURE_COUNT - 1) statsFile << ", ";
+    }
+    statsFile << "};\n\n";
+    statsFile << "static const float FEATURE_STDS[" << CSV_FEATURE_COUNT << "] = {";
+    for (int f = 0; f < CSV_FEATURE_COUNT; f++) {
+        statsFile << std::setprecision(8) << feature_stds[f];
+        if (f < CSV_FEATURE_COUNT - 1) statsFile << ", ";
+    }
+    statsFile << "};\n\n#endif\n";
+    statsFile.close();
+
+    //save unaugmented for knn (sensitive to duplicates)
+    csv_training_sample_t* knnTrainSet = new csv_training_sample_t[trainCount];
+    uint16_t knnTrainCount = trainCount;
+    memcpy(knnTrainSet, trainSet, trainCount * sizeof(csv_training_sample_t));
+
+    //data augmentation
+    std::default_random_engine rng(42);
+    std::vector<csv_training_sample_t> augmented;
+    augmented.reserve(trainCount * 4);
+
+    //keep
+    for (int i = 0; i < trainCount; i++) {
+        augmented.push_back(trainSet[i]);
+    }
+
+
+    //augment
+    std::normal_distribution<float> gasNoise(0.0f, 0.08f);    //gas features: +-8% noise in z-space
+    std::normal_distribution<float> deltaNoise(0.0f, 0.12f);   // delta features: +-12% noise in z-space
+
+    for (int aug = 0; aug < 2; aug++) {  // 2 augmented copies per original
+        for (int i = 0; i < trainCount; i++) {
+            csv_training_sample_t noisy = trainSet[i];
+            
+            noisy.features[0] += gasNoise(rng);   //gas1_response
+            noisy.features[1] += gasNoise(rng);   //gas2_response
+            noisy.features[2] += gasNoise(rng);   //gas_cross_ratio
+            noisy.features[3] += gasNoise(rng);   //gas_response_diff
+            noisy.features[4] += deltaNoise(rng); //delta_temp
+            noisy.features[5] += deltaNoise(rng); //delta_hum
+            noisy.features[6] += deltaNoise(rng); //delta_pres
+            noisy.features[7] += gasNoise(rng);   //log_gas_cross
+            
+            augmented.push_back(noisy);
+        }
+    }
+
+    // Replace training set
+    delete[] trainSet;
+    trainCount = augmented.size();
+    trainSet = new csv_training_sample_t[trainCount];
+    for (uint16_t i = 0; i < trainCount; i++) {
+        trainSet[i] = augmented[i];
+    }
+    std::cout << "Augmented training set: " << trainCount << " samples" << std::endl;    
+
+    
+
+
 
     //===========================================================================================================
     //DT
     //===========================================================================================================
     std::cout << "\nTraining Decision Tree..." << std::endl;
     DecisionTree dt;
-    dt.train(trainSet, trainCount, CSV_FEATURE_COUNT, 12, 5);
+    dt.train(trainSet, trainCount, CSV_FEATURE_COUNT, 10, 5);
     dt.getStats();
 
     std::cout << "Tree Stats:"<<std::endl;
@@ -98,15 +241,13 @@ int main(int argc, char* argv[]){
 
 
 
-
-
     //===========================================================================================================
     //KNN
     //===========================================================================================================
     std::cout << "\nTraining K-Nearest Neighbors..." << std::endl;
     KNN knn;
 
-    knn.train(trainSet, trainCount);
+    knn.train(knnTrainSet, knnTrainCount); //unaugmented
 
     uint8_t k=1;
     float bestKnnAcc = 0.0f;
@@ -139,14 +280,13 @@ int main(int argc, char* argv[]){
     uint16_t bestNumTrees=10;
     float bestRfAcc = 0.0f;
 
-    for(int trees : {10,25,50,100}){
+    for (int trees:{10, 25, 50, 100, 125, 150, 175, 200, 225, 250, 255}){
         RandomForest rfTest(trees, 10, 5, 0.7f);
         rfTest.train(trainSet, trainCount, CSV_FEATURE_COUNT);
 
         ml_metrics_t m = rfTest.evaluate(testSet, testCount);
         std::cout<< "Trees: " << std::setw(3) << trees << std::endl;
         std::cout << "Accuracy: "<< std::fixed << std::setprecision(2) << (m.accuracy * 100) <<"%" << "OOB Error: " <<  (rfTest.getOOBError()*100) << "%" << std::endl;
- 
         if(m.accuracy > bestRfAcc){
             bestRfAcc = m.accuracy;
             bestNumTrees = trees;
@@ -180,7 +320,6 @@ int main(int argc, char* argv[]){
     int sampleIdx = (testCount <5) ? testCount : 5;
     for(int i=0; i<sampleIdx; i++){
         scent_class_t actual = testSet[i].label;
-
         scent_class_t dtPred = dt.predict(testSet[i].features);
 
         float knnConf;
@@ -221,6 +360,7 @@ int main(int argc, char* argv[]){
     //cleanup
     delete[] trainSet;
     delete[] testSet;
+    delete[] knnTrainSet;
 
     std::cout << "\nTraining complete. Exiting." << std::endl;
 
