@@ -377,33 +377,69 @@ bool CSVLoader::load(const std::string& filename) {
 }
 
 void CSVLoader::split(float ratio, csv_training_sample_t*& trainSet, uint16_t &trainCount, csv_training_sample_t*& testSet, uint16_t &testCount){
-    //shuffled indicies
-    std::vector<uint16_t> indicies(_count);
-    for(uint16_t i=0; i<_count; i++){
-        indicies[i]=i;
+    //group by class
+    std::map<scent_class_t, std::vector<uint16_t>> classIndices;
+    for(uint16_t i = 0; i < _count; i++){
+        classIndices[_samples[i].label].push_back(i);
     }
 
     std::random_device rd;
     std::mt19937 g(rd());
-    std::shuffle(indicies.begin(), indicies.end(), g);
 
-    //calc split
-    trainCount = (uint16_t)(_count*ratio);
-    testCount = _count - trainCount;
+    std::vector<uint16_t> trainIdx, testIdx;
+
+    for(auto &i : classIndices){
+        //split each class
+        std::vector<uint16_t> &indices = i.second;
+        std::shuffle(indices.begin(), indices.end(), g);
+
+        uint16_t classTrain=(uint16_t)(indices.size() * ratio);
+
+        //ensure atleast 1 test per class
+        if(classTrain>=indices.size() &&indices.size()>1){
+            classTrain=indices.size()-1;
+        }
+
+        for(uint16_t i=0; i<classTrain;i++){
+            trainIdx.push_back(indices[i]);
+        }
+        for(uint16_t i=classTrain; i<indices.size();i++){
+            testIdx.push_back(indices[i]);
+        }
+    }
+
+    std::shuffle(trainIdx.begin(), trainIdx.end(), g);
+    std::shuffle(testIdx.begin(), testIdx.end(), g);
 
     //alloc
+    trainCount=trainIdx.size();
+    testCount=testIdx.size();
     trainSet = new csv_training_sample_t[trainCount];
     testSet = new csv_training_sample_t[testCount];
 
     //copy
     for (uint16_t i = 0; i < trainCount; i++) {
-        trainSet[i] = _samples[indicies[i]];
+        trainSet[i] = _samples[trainIdx[i]];
     }
     for (uint16_t i = 0; i < testCount; i++) {
-        testSet[i] = _samples[indicies[trainCount + i]];
+        testSet[i] = _samples[testIdx[i]];
     }
 
     std::cout << "Split into " << trainCount << " training samples and " << testCount << " testing samples." << std::endl;
+
+
+    //print per class split
+    std::map<scent_class_t, uint16_t> trainCounts,testCounts;
+
+    for(uint16_t i=0; i<trainCount;i++){
+        trainCounts[trainSet[i].label]++;
+    }
+    for(uint16_t i=0;i<testCount;i++){
+        testCounts[testSet[i].label]++;
+    }
+    for(auto &i : trainCounts){
+        std::cout<< getClassName(i.first)<< ": "<< i.second<< " train, "<< testCounts[i.first]<< " test" << std::endl;
+    }
 }
 
 

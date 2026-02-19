@@ -109,27 +109,34 @@ scent_class_t KNN::predictWithConfidence(const float* features, uint16_t feature
     std::partial_sort(neighbours.begin(), neighbours.begin()+k, neighbours.end(),[](const Neighbour &a, const Neighbour &b){
         return a.distance < b.distance;
     });
-    std::vector<uint16_t> classCount(SCENT_CLASS_COUNT, 0);
 
-    //count labels
-    for(uint8_t i=0; i<k; i++){
-        if(neighbours[i].label >= 0 && neighbours[i].label < SCENT_CLASS_COUNT){
-            classCount[neighbours[i].label]++;
+    //weighted voting
+    std::vector<float> classWeight(SCENT_CLASS_COUNT, 0.0f);
+
+    for(uint8_t i=0;i<k;i++){
+        if(neighbours[i].label >= 0 &&neighbours[i].label<SCENT_CLASS_COUNT){
+            float w= 1.0f / (neighbours[i].distance + 1e-5f);
+            classWeight[neighbours[i].label] += w;
         }
     }
 
-    uint16_t maxCount=0;
+    float maxWeight = 0.0f;
     scent_class_t predClass = SCENT_CLASS_UNKNOWN;
 
     for(uint16_t i=0; i<SCENT_CLASS_COUNT; i++){
-        if(classCount[i] > maxCount){
-            maxCount = classCount[i];
+        if(classWeight[i] > maxWeight){
+            maxWeight = classWeight[i];
             predClass = (scent_class_t)i;
         }
     }
 
+    float totalWeight=0.0f;
+    for(uint16_t i=0; i<SCENT_CLASS_COUNT; i++){
+        totalWeight += classWeight[i];
+    }
+
     //confidence
-    confidence = (k>0)?(float)maxCount / k: 0.0f;
+    confidence = (totalWeight > 0.0f)? maxWeight / totalWeight : 0.0f;
     
     return predClass;
 }
@@ -147,7 +154,7 @@ ml_metrics_t KNN::evaluate(const ml_training_sample_t *samples, uint16_t count) 
     }
 
     for(uint16_t i=0; i<count; i++){
-        scent_class_t pred = predict(samples[i].features, 12);
+        scent_class_t pred = predict(samples[i].features, KNN_FEATURE_COUNT);
         scent_class_t actual = samples[i].label;
 
         if(pred == actual){

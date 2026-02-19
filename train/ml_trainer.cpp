@@ -37,9 +37,8 @@ void printConfusionMatrix(const ml_metrics_t &m){
 
 void printFeatureNames(){
     const char* names[]={
-        "temp1", "hum1", "pres1", "gas1_0",
-        "temp2", "hum2", "pres2", "gas2_0",
-        "delta_temp", "delta_hum", "delta_pres", "delta_gas"
+        "gas1_response", "gas2_response", "gas_cross_ratio", "gas_response_diff",
+        "delta_temp", "delta_hum", "delta_pres", "log_gas_cross"
     };
     std::cout << "\nFeatures (" << CSV_FEATURE_COUNT << "):" << std::endl;
     for(int i=0; i< CSV_FEATURE_COUNT; i++){
@@ -175,23 +174,44 @@ int main(int argc, char* argv[]){
 
     //data augmentation
     std::default_random_engine rng(42);
-    std::vector<csv_training_sample_t> augmented;
-    augmented.reserve(trainCount * 4);
-
-    //keep
-    for (int i = 0; i < trainCount; i++) {
-        augmented.push_back(trainSet[i]);
-    }
-
 
     //augment
     std::normal_distribution<float> gasNoise(0.0f, 0.08f);    //gas features: +-8% noise in z-space
     std::normal_distribution<float> deltaNoise(0.0f, 0.12f);   // delta features: +-12% noise in z-space
 
-    for (int aug = 0; aug < 2; aug++) {  // 2 augmented copies per original
-        for (int i = 0; i < trainCount; i++) {
-            csv_training_sample_t noisy = trainSet[i];
-            
+    uint16_t classCounts[SCENT_CLASS_COUNT] = {0};
+    std::vector<std::vector<uint16_t>> classIndices(SCENT_CLASS_COUNT);
+
+    for(int i=0;i<trainCount; i++){
+        if(trainSet[i].label <SCENT_CLASS_COUNT){
+            classCounts[trainSet[i].label]++;
+            classIndices[trainSet[i].label].push_back(i);
+        }
+    }
+
+    uint16_t maxClassCount = *std::max_element(classCounts,classCounts+SCENT_CLASS_COUNT);
+    uint16_t targetPerClass = maxClassCount * 3;
+
+    std::vector<csv_training_sample_t> augmented;
+    augmented.reserve(targetPerClass * SCENT_CLASS_COUNT);
+
+    //keep og
+    for(int i=0; i<trainCount;i++){
+        augmented.push_back(trainSet[i]);
+    }
+
+    std::uniform_int_distribution<uint16_t> tempDist(0,1);
+    for(int c=0; c<SCENT_CLASS_COUNT;c++){
+        if(classIndices[c].empty()){
+            continue;
+        }
+
+        int need= targetPerClass - (int)classCounts[c];
+        std::uniform_int_distribution<uint16_t> srcDist(0, classIndices[c].size()-1);
+        for(int j=0;j<need;j++){
+            uint16_t srcIdx = classIndices[c][srcDist(rng)];
+            csv_training_sample_t noisy = trainSet[srcIdx];
+
             noisy.features[0] += gasNoise(rng);   //gas1_response
             noisy.features[1] += gasNoise(rng);   //gas2_response
             noisy.features[2] += gasNoise(rng);   //gas_cross_ratio
@@ -200,7 +220,7 @@ int main(int argc, char* argv[]){
             noisy.features[5] += deltaNoise(rng); //delta_hum
             noisy.features[6] += deltaNoise(rng); //delta_pres
             noisy.features[7] += gasNoise(rng);   //log_gas_cross
-            
+
             augmented.push_back(noisy);
         }
     }
@@ -213,7 +233,15 @@ int main(int argc, char* argv[]){
         trainSet[i] = augmented[i];
     }
     std::cout << "Augmented training set: " << trainCount << " samples" << std::endl;    
-
+    for(int c=0; c<SCENT_CLASS_COUNT;c++){
+        int count=0;
+        for(int j=0; j<trainCount; j++){
+            if(trainSet[j].label == c){
+                count++;
+            }
+        }
+        std::cout << "Class " << CSVLoader::getClassName((scent_class_t)c) << ": " << count << " samples" << std::endl;
+    }
     
 
 
@@ -222,8 +250,33 @@ int main(int argc, char* argv[]){
     //DT
     //===========================================================================================================
     std::cout << "\nTraining Decision Tree..." << std::endl;
+
+    uint8_t bestDTDepth=0;
+    uint8_t bestDTMinSamples=0;
+    float bestDTAcc=0.0f;
+
+    for(uint8_t d=5; d<=20; d++){
+        for(uint8_t ms:{1,3,5,8,10,15,20}){
+            DecisionTree dtTest;
+            dtTest.train(trainSet, trainCount, CSV_FEATURE_COUNT, d, ms);
+            ml_metrics_t m = dtTest.evaluate(testSet, testCount);
+
+            std::cout << "DT depth=" << (int)d << " minSamples=" << (int)ms<< " -> " << std::fixed << std::setprecision(2) << (m.accuracy * 100) << "%" << std::endl;
+            
+            if(m.accuracy > bestDTAcc){
+                bestDTAcc = m.accuracy;
+                bestDTDepth = d;
+                bestDTMinSamples = ms;
+            }
+        }
+    }
+
+    std::cout << "\nBest DT Depth: " << (int)bestDTDepth << " Min Samples: " << (int)bestDTMinSamples << " Accuracy: " << std::fixed << std::setprecision(2) << (bestDTAcc * 100) << "%" << std::endl;
+
+
+
     DecisionTree dt;
-    dt.train(trainSet, trainCount, CSV_FEATURE_COUNT, 10, 5);
+    dt.train(trainSet, trainCount, CSV_FEATURE_COUNT, bestDTDepth, bestDTMinSamples);
     dt.getStats();
 
     std::cout << "Tree Stats:"<<std::endl;
@@ -252,7 +305,7 @@ int main(int argc, char* argv[]){
     uint8_t k=1;
     float bestKnnAcc = 0.0f;
 
-    for(int i=0; i<=15; i+=2){
+    for(int i=1; i<=20; i++){
         knn.setK(i);
         ml_metrics_t knnM = knn.evaluate(testSet, testCount);
         std::cout << "K=" << std::setw(2) << i << ": " 
@@ -277,40 +330,47 @@ int main(int argc, char* argv[]){
     //===========================================================================================================
     std::cout << "\nTraining Random Forest..." << std::endl;
 
-    uint16_t bestNumTrees=10;
+    RandomForest* bestRf = nullptr;
+    float bestOOBError = 1.0f;
+    uint16_t bestNumTrees=0;
     float bestRfAcc = 0.0f;
 
     for (int trees:{10, 25, 50, 100, 125, 150, 175, 200, 225, 250, 255}){
-        RandomForest rfTest(trees, 10, 5, 0.7f);
-        rfTest.train(trainSet, trainCount, CSV_FEATURE_COUNT);
+        RandomForest* rfTest= new RandomForest(trees, 15, 5, 0.375f);
+        rfTest->train(trainSet, trainCount, CSV_FEATURE_COUNT);
 
-        ml_metrics_t m = rfTest.evaluate(testSet, testCount);
+        ml_metrics_t m = rfTest->evaluate(testSet, testCount);
+        float oobErr= rfTest->getOOBError();
+
         std::cout<< "Trees: " << std::setw(3) << trees << std::endl;
-        std::cout << "Accuracy: "<< std::fixed << std::setprecision(2) << (m.accuracy * 100) <<"%" << "OOB Error: " <<  (rfTest.getOOBError()*100) << "%" << std::endl;
-        if(m.accuracy > bestRfAcc){
+        std::cout << "Accuracy: "<< std::fixed << std::setprecision(2) << (m.accuracy * 100) <<"%" << "OOB Error: " <<  (oobErr*100) << "%" << std::endl;
+        
+        if(oobErr < bestOOBError){
+            bestOOBError = oobErr;
             bestRfAcc = m.accuracy;
-            bestNumTrees = trees;
+            bestNumTrees=trees;
+            delete bestRf;
+            bestRf=rfTest;
+        }
+        else{
+            delete rfTest;
         }
     }
-
     std::cout << "\nBest Number of Trees: " << bestNumTrees << std::endl;
     std::cout << "Accuracy: "<< std::fixed << std::setprecision(2) << (bestRfAcc * 100) << "%" << std::endl;
+    std::cout << "OOB Error: "<< std::fixed << std::setprecision(2) << (bestOOBError * 100) << "%" << std::endl;
 
-    //train final model
-    RandomForest rf(bestNumTrees, 10, 5, 0.7f);
-    rf.train(trainSet, trainCount, CSV_FEATURE_COUNT);
-
-    ml_metrics_t rfM = rf.evaluate(testSet, testCount);
+    ml_metrics_t rfM = bestRf->evaluate(testSet, testCount);
     printMetrics(rfM, "Random Forest");
     printConfusionMatrix(rfM);
-    rf.printFeatureImportance();
+    bestRf->printFeatureImportance();
     
     
     //===========================================================================================================
 
     //save models
     dt.saveModel("dt_model.bin");
-    rf.saveModel("rf_model.bin");
+    bestRf->saveModel("rf_model.bin");
     knn.saveModel("knn_model.bin");
 
     std::cout << "\nModels saved to disk." << std::endl;
@@ -326,7 +386,7 @@ int main(int argc, char* argv[]){
         scent_class_t knnPred = knn.predictWithConfidence(testSet[i].features, CSV_FEATURE_COUNT, knnConf);
 
         float rfConf;
-        scent_class_t rfPred = rf.predictWithConfidence(testSet[i].features, rfConf);
+        scent_class_t rfPred = bestRf->predictWithConfidence(testSet[i].features, rfConf);
 
         std::cout << "\nSample " << i << ":" << std::endl;
 
@@ -357,10 +417,21 @@ int main(int argc, char* argv[]){
     
     std::cout << "\n  >> Best Model: " << bestModel << " (" << (bestAcc * 100) << "%)" << std::endl;
 
+
+    //save ensemble weights
+    std::ofstream ensembleFile("ensemble_weights.h");
+    ensembleFile << "#ifndef ENSEMBLE_WEIGHTS_H\n#define ENSEMBLE_WEIGHTS_H\n\n";
+    ensembleFile << "static const float DT_WEIGHT = " << (dtMetrics.accuracy * dtMetrics.accuracy) << "f;\n";
+    ensembleFile << "static const float KNN_WEIGHT = " << (kNNMetrics.accuracy * kNNMetrics.accuracy) << "f;\n";
+    ensembleFile << "static const float RF_WEIGHT = " << (rfM.accuracy * rfM.accuracy) << "f;\n";
+    ensembleFile << "\n#endif\n";
+    ensembleFile.close();
+
     //cleanup
     delete[] trainSet;
     delete[] testSet;
     delete[] knnTrainSet;
+    delete bestRf;
 
     std::cout << "\nTraining complete. Exiting." << std::endl;
 

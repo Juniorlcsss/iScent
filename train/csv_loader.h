@@ -6,7 +6,7 @@
 #include <vector>
 #include <map>
 
-#define CSV_FEATURE_COUNT 8
+#define CSV_FEATURE_COUNT 12
 
 //scent classes
 typedef enum {

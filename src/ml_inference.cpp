@@ -1,7 +1,7 @@
 #include "ml_inference.h"
 #include <LittleFS.h>
 #include <ctype.h>
-#include "model headers/feature_stats.h"
+#include "feature_stats.h"
 
 #if EI_CLASSIFIER
 #include "iScent_inferencing.h"
@@ -10,6 +10,8 @@
 #include "model headers/dt_model_header.h"
 #include "model headers/knn_model_header.h"
 #include "model headers/rf_model_header.h"
+#include "ensemble_weights.h"
+
 
 MLInference::MLInference():
     _window_index(0),
@@ -1058,10 +1060,6 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
     //
     memset(pred.classScores, 0 ,sizeof(pred.classScores));
 
-    //weight
-    const float DT_WEIGHT = 0.73f;
-    const float KNN_WEIGHT = 0.61f;
-    const float RF_WEIGHT = 0.81f;
 
     if(dtCls<SCENT_CLASS_COUNT){
         pred.classScores[dtCls ]+= dtConf * DT_WEIGHT;
@@ -1186,8 +1184,8 @@ void MLInference::normaliseFeatures(ml_feature_buffer_t& features, const baselin
     
     //z-score
     for (int i = 0; i < 8; i++) {
-        if (FEATURE_STD[i] > 1e-6f) {
-            features.features[i] = (features.features[i] - FEATURE_MEAN[i]) / FEATURE_STD[i];
+        if (FEATURE_STDS[i] > 1e-6f) {
+            features.features[i] = (features.features[i] - FEATURE_MEANS[i]) / FEATURE_STDS[i];
         }
     }
     

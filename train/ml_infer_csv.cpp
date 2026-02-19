@@ -13,7 +13,7 @@
 #include "../include/model headers/dt_model_header.h"
 #include "../include/model headers/knn_model_header.h"
 #include "../include/model headers/rf_model_header.h"
-#include "feature_stats.h"
+#include "../include/feature_stats.h"
 
 static const int FEATURE_COUNT = 8;
 
@@ -153,7 +153,7 @@ static std::string normaliseLabel(const std::string& raw) {
 }
 
 static int labelIndex(const std::string& raw) {
-    const std::string norm = normalizeLabel(raw);
+    const std::string norm = normaliseLabel(raw);
     for (int i = 0; i < 12; ++i) {
         if (norm == CLASS_NAMES[i]) return i;
     }
@@ -224,7 +224,7 @@ static bool parseCsv(const std::string& path,std::vector<RawRow>& dataRows,std::
         row.sensors[6] = toFloat(fields[8]);  // pres2
         row.sensors[7] = toFloat(fields[9]);  // gas2_0
 
-        const std::string normLabel = normalizeLabel(row.rawLabel);
+        const std::string normLabel = normaliseLabel(row.rawLabel);
         if(normLabel == "calibration" || normLabel == "baseline" || normLabel == "ambient"){
             calibrationRows.push_back(row);
         }
