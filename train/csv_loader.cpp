@@ -104,6 +104,18 @@ static void applyBaselineTransform(csv_training_sample_t& sample, const Baseline
 
     float log_gas_cross = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
 
+    //seperate high gas and low gas
+    float gas_cross = gas1_response * gas2_response;
+
+    //normalised differential
+    float gas_ndiff =(gas_cross_ratio>0.01f) ? gas_diff_abs/gas_cross_ratio :0.0f;
+
+    //hum-temp interaction
+    float hum_temp_i = delta_hum_abs / (delta_temp_abs + 0.01f);
+
+    //asymmetric gas measure
+    float gas_ratio= (gas2_response > 0.01f) ? gas1_response / gas2_response : 1.0f;
+
     sample.features[0] = gas1_response;
     sample.features[1] = gas2_response;
     sample.features[2] = gas_cross_ratio;
@@ -112,6 +124,10 @@ static void applyBaselineTransform(csv_training_sample_t& sample, const Baseline
     sample.features[5] = delta_hum_abs;
     sample.features[6] = delta_pres_abs;
     sample.features[7] = log_gas_cross;
+    sample.features[8] = gas_cross;
+    sample.features[9] = gas_ndiff;
+    sample.features[10] = hum_temp_i;
+    sample.features[11] = gas_ratio;
 }
 
 }//end of ns

@@ -1171,6 +1171,12 @@ void MLInference::normaliseFeatures(ml_feature_buffer_t& features, const baselin
     
     //Log cross-ratio
     float log_gas_cross = logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f);
+
+    float gas_cross = gas1_response * gas2_response;
+    float gas_diff_abs = fabsf(gas1_response - gas2_response);
+
+    float delta_temp_abs = fabsf(temp1_raw - temp2_raw);
+    float delta_hum_abs  = fabsf(hum1_raw - hum2_raw);
     
     features.features[0] = gas1_response;
     features.features[1] = gas2_response;
@@ -1180,10 +1186,14 @@ void MLInference::normaliseFeatures(ml_feature_buffer_t& features, const baselin
     features.features[5] = fabsf(hum1_raw - hum2_raw);
     features.features[6] = fabsf(pres1_raw - pres2_raw);
     features.features[7] = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
-    features.featureCount = 8;
+    features.features[8]= gas_cross;
+    features.features[9]= (gas_cross_ratio>0.01f) ? gas_diff_abs/gas_cross_ratio :0.0f;
+    features.features[10]= delta_hum_abs / (delta_temp_abs + 0.01f);
+    features.features[11]= (gas2_response > 0.01f) ? gas1_response / gas2_response : 1.0f;
+    features.featureCount = 12;
     
     //z-score
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < TOTAL_ML_FEATURES; i++) {
         if (FEATURE_STDS[i] > 1e-6f) {
             features.features[i] = (features.features[i] - FEATURE_MEANS[i]) / FEATURE_STDS[i];
         }
@@ -1195,7 +1205,7 @@ void MLInference::normaliseFeatures(ml_feature_buffer_t& features, const baselin
 
 void MLInference::printFeatureDebug() const {
     DEBUG_PRINTLN(F("\n=== Feature Debug ==="));
-    const char* names[] = {"gas1_resp","gas2_resp","gas_cross","gas_diff","d_temp","d_hum","d_pres","log_gas_cross"};
+    const char* names[] = {"gas1_resp","gas2_resp","gas_cross","gas_diff","d_temp","d_hum","d_pres","log_gas_cross","gas_cross_p","gas_ndiff","hum_temp_i","gas_asym"};
     for (int i = 0; i < TOTAL_ML_FEATURES; i++) {
         float raw = _feature_buffer.features[i];
         DEBUG_PRINTF("  [%d] %s = %.4f (z-score: %.2f σ from mean)\n", 

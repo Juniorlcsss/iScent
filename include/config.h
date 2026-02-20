@@ -110,7 +110,7 @@ typedef enum{
 //total features
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
 #define ML_DELTA_FEATURES 4 //delta_temp, delta_hum, delta_pres, log_gas_cross
-#define TOTAL_ML_FEATURES 8
+#define TOTAL_ML_FEATURES 12
 
 //tea classification labels
 typedef enum {

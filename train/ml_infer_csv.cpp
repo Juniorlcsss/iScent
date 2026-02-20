@@ -15,7 +15,7 @@
 #include "../include/model headers/rf_model_header.h"
 #include "../include/feature_stats.h"
 
-static const int FEATURE_COUNT = 8;
+static const int FEATURE_COUNT = 12;
 
 struct RawRow {
     std::string rawLabel;
@@ -43,7 +43,9 @@ static const char* CLASS_NAMES[12] = {
 };
 
 static const char* FEATURE_NAMES[FEATURE_COUNT] = {
-    "gas1_resp", "gas2_resp", "gas_cross", "gas_diff","d_temp", "d_hum", "d_pres", "log_gas_cross"
+    "gas1_resp", "gas2_resp", "gas_cross", "gas_diff",
+    "d_temp", "d_hum", "d_pres", "log_gas_cross",
+    "gas_cross_p", "gas_ndiff", "hum_temp_i", "gas_ratio"
 };
 
 struct Baseline {
@@ -106,15 +108,28 @@ static Row toEnvironmentInvariantRow(const RawRow& raw, const Baseline& b) {
     float gas1_response = (b.gas1 > 0) ? gas1_raw / b.gas1 : 1.0f;
     float gas2_response = (b.gas2 > 0) ? gas2_raw / b.gas2 : 1.0f;
     float gas_cross_ratio = (gas2_raw > 0) ? gas1_raw / gas2_raw : 1.0f;
+    float gas_diff_abs = fabsf(gas1_response - gas2_response);
+    float delta_temp_abs = fabsf(raw.sensors[0] - raw.sensors[4]);
+    float delta_hum_abs  = fabsf(raw.sensors[1] - raw.sensors[5]);
+    float delta_pres_abs = fabsf(raw.sensors[2] - raw.sensors[6]);
+    float log_gas_cross = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
+    float gas_cross = gas1_response * gas2_response;
+    float gas_ndiff = (gas_cross_ratio > 0.01f) ? gas_diff_abs / gas_cross_ratio : 0.0f;
+    float hum_temp_i = delta_hum_abs / (delta_temp_abs + 0.01f);
+    float gas_ratio = (gas2_response > 0.01f) ? gas1_response / gas2_response : 1.0f;
 
-    out.features[0] = gas1_response;
-    out.features[1] = gas2_response;
-    out.features[2] = gas_cross_ratio;
-    out.features[3] = fabsf(gas1_response - gas2_response);
-    out.features[4] = fabsf(raw.sensors[0] - raw.sensors[4]);
-    out.features[5] = fabsf(raw.sensors[1] - raw.sensors[5]);
-    out.features[6] = fabsf(raw.sensors[2] - raw.sensors[6]);
-    out.features[7] = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
+    out.features[0]  = gas1_response;
+    out.features[1]  = gas2_response;
+    out.features[2]  = gas_cross_ratio;
+    out.features[3]  = gas_diff_abs;
+    out.features[4]  = delta_temp_abs;
+    out.features[5]  = delta_hum_abs;
+    out.features[6]  = delta_pres_abs;
+    out.features[7]  = log_gas_cross;
+    out.features[8]  = gas_cross;
+    out.features[9]  = gas_ndiff;
+    out.features[10] = hum_temp_i;
+    out.features[11] = gas_ratio;
 
     for(int i = 0; i < FEATURE_COUNT; i++){
         if(FEATURE_STDS[i] > 1e-6f){

@@ -18,6 +18,35 @@ void printMetrics(const ml_metrics_t& m, const char* modelName){
     std::cout << "Accuracy: " << std::fixed << std::setprecision(2) << (m.accuracy*100)<<"% (" << m.correct << "/" << m.total << ")" << std::endl;
 }
 
+void printPerClassMetrics(const ml_metrics_t& m){
+    std::cout<<"\nPer-Class Precision/Recall/F1:"<<std::endl;
+
+    for(int i=0; i<SCENT_CLASS_COUNT; i++){
+        //recall
+        int recallTotal=0;
+        for(int j=0; j<SCENT_CLASS_COUNT; j++){
+            recallTotal+= m.confusionMatrix[i][j];
+        }
+
+        //precision
+        int predictedTotal=0;
+        for(int j=0; j<SCENT_CLASS_COUNT; j++){
+            predictedTotal+= m.confusionMatrix[j][i];
+        }
+
+        //true positives
+        int tp = m.confusionMatrix[i][i];
+        float recall = (recallTotal > 0) ? ((float)tp / recallTotal) : 0.0f;
+        float precision = (predictedTotal > 0) ? ((float)tp / predictedTotal) : 0.0f;
+        float f1 = (precision + recall > 0) ? (2 * precision * recall) / (precision + recall) : 0.0f;
+
+        std::cout<<"P="<< std::fixed << std::setprecision(2) << (precision*100)<<"%";
+        std::cout<<" R="<< std::fixed << std::setprecision(2)<< (recall*100)<<"%";
+        std::cout<<" F1="<< std::fixed << std::setprecision(2) << (f1*100)<<"%"<<std::endl;
+    }
+}
+
+
 void printConfusionMatrix(const ml_metrics_t &m){
     std::cout << "\nConfusion Matrix:"<<std::endl;
     std::cout << "Predicted -> ";
@@ -38,7 +67,7 @@ void printConfusionMatrix(const ml_metrics_t &m){
 void printFeatureNames(){
     const char* names[]={
         "gas1_response", "gas2_response", "gas_cross_ratio", "gas_response_diff",
-        "delta_temp", "delta_hum", "delta_pres", "log_gas_cross"
+        "delta_temp", "delta_hum", "delta_pres", "log_gas_cross", "gas_cross", "gas_ndiff", "hum_temp_i", "gas_asym"
     };
     std::cout << "\nFeatures (" << CSV_FEATURE_COUNT << "):" << std::endl;
     for(int i=0; i< CSV_FEATURE_COUNT; i++){
@@ -78,7 +107,9 @@ int main(int argc, char* argv[]){
     uint16_t trainCount=0, testCount=0;
     loader.split(trainRatio, trainSet, trainCount, testSet, testCount);
     std::cout << "\n=== Training Feature Statistics ===" << std::endl;
-    const char* fnames[] = {"gas1_resp","gas2_resp","gas_cross","gas_diff","d_temp","d_hum","d_pres","log_gas_cross"};
+    const char* fnames[] = {"gas1_resp", "gas2_resp", "gas_cross", "gas_diff",
+    "d_temp", "d_hum", "d_pres", "log_gas_cross",
+    "gas_cross_p", "gas_ndiff", "hum_temp_i", "gas_ratio"};
 
     
     //per class stats
@@ -176,8 +207,8 @@ int main(int argc, char* argv[]){
     std::default_random_engine rng(42);
 
     //augment
-    std::normal_distribution<float> gasNoise(0.0f, 0.08f);    //gas features: +-8% noise in z-space
-    std::normal_distribution<float> deltaNoise(0.0f, 0.12f);   // delta features: +-12% noise in z-space
+    std::normal_distribution<float> gasNoise(0.0f, 0.05f);    //gas features: +-8% noise in z-space
+    std::normal_distribution<float> deltaNoise(0.0f, 0.08f);   // delta features: +-12% noise in z-space
 
     uint16_t classCounts[SCENT_CLASS_COUNT] = {0};
     std::vector<std::vector<uint16_t>> classIndices(SCENT_CLASS_COUNT);
@@ -220,6 +251,10 @@ int main(int argc, char* argv[]){
             noisy.features[5] += deltaNoise(rng); //delta_hum
             noisy.features[6] += deltaNoise(rng); //delta_pres
             noisy.features[7] += gasNoise(rng);   //log_gas_cross
+            noisy.features[8] += gasNoise(rng);   //gas_cross
+            noisy.features[9] += gasNoise(rng);   //gas_ndiff
+            noisy.features[10] += deltaNoise(rng); //hum_temp_i
+            noisy.features[11] += gasNoise(rng);   //gas_asym
 
             augmented.push_back(noisy);
         }
@@ -290,6 +325,7 @@ int main(int argc, char* argv[]){
 
     ml_metrics_t dtMetrics = dt.evaluate(testSet, testCount);
     printMetrics(dtMetrics, "Decision Tree");
+    printPerClassMetrics(dtMetrics);
     printConfusionMatrix(dtMetrics);
 
 
@@ -323,6 +359,7 @@ int main(int argc, char* argv[]){
     knn.setK(k);
     ml_metrics_t kNNMetrics = knn.evaluate(testSet, testCount);
     printMetrics(kNNMetrics, "K-Nearest Neighbors");
+    printPerClassMetrics(kNNMetrics);
     printConfusionMatrix(kNNMetrics);
 
     //===========================================================================================================
@@ -336,7 +373,7 @@ int main(int argc, char* argv[]){
     float bestRfAcc = 0.0f;
 
     for (int trees:{10, 25, 50, 100, 125, 150, 175, 200, 225, 250, 255}){
-        RandomForest* rfTest= new RandomForest(trees, 15, 5, 0.375f);
+        RandomForest* rfTest= new RandomForest(trees, 15, 3, 0.25f);
         rfTest->train(trainSet, trainCount, CSV_FEATURE_COUNT);
 
         ml_metrics_t m = rfTest->evaluate(testSet, testCount);
@@ -363,6 +400,7 @@ int main(int argc, char* argv[]){
     ml_metrics_t rfM = bestRf->evaluate(testSet, testCount);
     printMetrics(rfM, "Random Forest");
     printConfusionMatrix(rfM);
+    printPerClassMetrics(rfM);
     bestRf->printFeatureImportance();
     
     
