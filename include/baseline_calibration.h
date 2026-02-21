@@ -10,12 +10,16 @@ typedef struct {
     float temp1_baseline;
     float hum1_baseline;
     float pres1_baseline;
-    float gas1_baseline;  //median of all heater steps
-    
     float temp2_baseline;
     float hum2_baseline;
     float pres2_baseline;
-    float gas2_baseline;  //median of all heater steps
+
+    float gas1_step_baselines[BME688_NUM_HEATER_STEPS];
+    float gas2_step_baselines[BME688_NUM_HEATER_STEPS];
+
+    //legacy single value
+    float gas1_baseline;
+    float gas2_baseline;
     
     uint32_t calibration_time;
     bool valid;
@@ -69,19 +73,18 @@ private:
     float _temp1_samples[64];
     float _hum1_samples[64];
     float _pres1_samples[64];
-    float _gas1_samples[64];
+    float _gas1_step_samples[BME688_NUM_HEATER_STEPS][64];
     
     float _temp2_samples[64];
     float _hum2_samples[64];
     float _pres2_samples[64];
-    float _gas2_samples[64];
+    float _gas2_step_samples[BME688_NUM_HEATER_STEPS][64];
     
     uint16_t _sample_index;
     uint16_t _target_samples;
     uint32_t _calibration_start_time;
     
     float computeMedian(float* samples, uint16_t count);
-    float computeMedianGas(const dual_sensor_data_t& data);
 };
 
 #endif

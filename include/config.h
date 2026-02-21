@@ -61,8 +61,9 @@
 #define BME688_HEATER_DURATION 100 //ms
 
 //heater profile defaults tuned for tea VOC range (higher temps 360–400C)
-static const uint16_t DEFAULT_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {360, 365, 370, 375, 380, 385, 390, 395, 400, 400};
-static const uint16_t DEFAULT_HEATER_DURATIONS[BME688_NUM_HEATER_STEPS] = {120, 120, 120, 120, 120, 120, 120, 120, 120, 120};
+static const uint16_t DEFAULT_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {200, 250, 280, 310, 340, 360, 380, 400, 430, 450};
+static const uint16_t DEFAULT_HEATER_DURATIONS[BME688_NUM_HEATER_STEPS] = {150, 150, 140, 130, 120, 110, 100, 100, 100, 100};
+
 static const uint16_t VOC_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {330, 340, 350, 360, 370, 380, 390, 395, 400, 400};
 static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {320, 340, 360, 380, 400, 420, 440, 460, 480, 480};
 
@@ -105,12 +106,12 @@ typedef enum{
 #define ML_SENSOR_COUNT 2
 #define ML_MODEL_PATH
 #define ML_STRIDE 5
-#define ML_HEATER_STEPS 1
+#define ML_HEATER_STEPS BME688_NUM_HEATER_STEPS
 
 //total features
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
 #define ML_DELTA_FEATURES 4 //delta_temp, delta_hum, delta_pres, log_gas_cross
-#define TOTAL_ML_FEATURES 12
+#define TOTAL_ML_FEATURES 37
 
 //tea classification labels
 typedef enum {

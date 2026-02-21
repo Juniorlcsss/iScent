@@ -15,11 +15,15 @@
 #include "../include/model headers/rf_model_header.h"
 #include "../include/feature_stats.h"
 
-static const int FEATURE_COUNT = 12;
+static const int FEATURE_COUNT = 37;
+static const int NUM_HEATER_STEPS = 10;
 
 struct RawRow {
     std::string rawLabel;
-    float sensors[8]; //temp1,hum1,pres1,gas1_0,temp2,hum2,pres2,gas2_0
+    float temp1, hum1, pres1;
+    float gas1[NUM_HEATER_STEPS];
+    float temp2, hum2, pres2;
+    float gas2[NUM_HEATER_STEPS];
 };
 
 struct Row {
@@ -42,17 +46,53 @@ static const char* CLASS_NAMES[12] = {
     "sweet cherry"
 };
 
-static const char* FEATURE_NAMES[FEATURE_COUNT] = {
-    "gas1_resp", "gas2_resp", "gas_cross", "gas_diff",
-    "d_temp", "d_hum", "d_pres", "log_gas_cross",
-    "gas_cross_p", "gas_ndiff", "hum_temp_i", "gas_ratio"
-};
+static const char* shortFeatureName(int idx){
+    static char buf[16];
+    if(idx<10){
+        snprintf(buf, sizeof(buf),"g1_s%d",idx);
+        return buf;
+    }
+    if(idx>=10 && idx<20){
+        snprintf(buf, sizeof(buf),"g2_s%d",idx-10);
+        return buf;
+    }
+    if(idx>=20 && idx<30){
+        snprintf(buf, sizeof(buf),"cr_s%d",idx-20);
+        return buf;
+    }
+    if(idx==30){
+        return "slope1";
+    }
+    if(idx==31){
+        return "slope2";
+    }
+    if(idx==32){
+        return "curvature1";
+    }
+    if(idx==33){
+        return "curvature2";
+    }
+    if(idx==34){
+        return "delta_temp";
+    }
+    if(idx==35){
+        return "delta_hum";
+    }
+    if(idx==36){
+        return "delta_pres";
+    }
+
+    snprintf(buf, sizeof(buf), "f_%d", idx);
+    return buf;
+
+}
 
 struct Baseline {
     float temp1, temp2;
     float hum1, hum2;
     float pres1, pres2;
-    float gas1, gas2;
+    float gas1_steps[NUM_HEATER_STEPS];
+    float gas2_steps[NUM_HEATER_STEPS];
 };
 
 static float medianVec(std::vector<float>& v) {
@@ -72,64 +112,97 @@ static float medianVec(std::vector<float>& v) {
     return m;
 }
 
-static Baseline computeBaseline(const std::vector<RawRow>& rows) {
-    std::vector<float> temp1v, temp2v, hum1v, hum2v, pres1v, pres2v, gas1v, gas2v;
-    for(const auto& r : rows){
-        temp1v.push_back(r.sensors[0]);
-        hum1v.push_back(r.sensors[1]);
-        pres1v.push_back(r.sensors[2]);
-        gas1v.push_back(r.sensors[3]);
-        temp2v.push_back(r.sensors[4]);
-        hum2v.push_back(r.sensors[5]);
-        pres2v.push_back(r.sensors[6]);
-        gas2v.push_back(r.sensors[7]);
+static float localSlope(const float* data, int n){
+    if(n<=1){
+        return 0.0f;
     }
+    float sumX=0.0f, sumY=0.0f, sumXY=0.0f, sumXX=0.0f;
+    for(int i=0; i<n; i++){
+        sumX+=i;
+        sumY+=data[i];
+        sumXY+= i*data[i];
+        sumXX+= i*i;
+    }
+    float denom=n*sumXX - sumX*sumX;
+    return (fabsf(denom) < 1e-6f) ? 0.0f : (n * sumXY - sumX * sumY) / denom;
+}
+
+static Baseline computeBaseline(const std::vector<RawRow>& rows) {
     Baseline b{};
+    if(rows.empty()){ 
+        return b;
+    }
+
+    std::vector<float> temp1v, temp2v, hum1v, hum2v, pres1v, pres2v;
+    std::vector<float> gas1v[NUM_HEATER_STEPS], gas2v[NUM_HEATER_STEPS];
+
+    for(const auto& r : rows){
+        temp1v.push_back(r.temp1);
+        hum1v.push_back(r.hum1);
+        pres1v.push_back(r.pres1);
+        temp2v.push_back(r.temp2);
+        hum2v.push_back(r.hum2);
+        pres2v.push_back(r.pres2);
+        for(int i=0; i<NUM_HEATER_STEPS;i++){
+            gas1v[i].push_back(r.gas1[i]);
+            gas2v[i].push_back(r.gas2[i]);
+        }
+    }
+
     b.temp1 = medianVec(temp1v);
     b.temp2 = medianVec(temp2v);
     b.hum1 = medianVec(hum1v);
     b.hum2 = medianVec(hum2v);
     b.pres1 = medianVec(pres1v);
     b.pres2 = medianVec(pres2v);
-    b.gas1 = medianVec(gas1v);
-    b.gas2 = medianVec(gas2v);
-    if(b.gas1 == 0.0f) b.gas1 = 1.0f;
-    if(b.gas2 == 0.0f) b.gas2 = 1.0f;
+    
+    for(int i=0; i<NUM_HEATER_STEPS;i++){
+        b.gas1_steps[i] = medianVec(gas1v[i]);
+        b.gas2_steps[i] = medianVec(gas2v[i]);
+        if(b.gas1_steps[i] < 1.0f){
+            b.gas1_steps[i] = 1.0f;
+        }
+        if(b.gas2_steps[i] < 1.0f){
+            b.gas2_steps[i] = 1.0f;
+        }
+
+    }
     return b;
 }
 
 static Row toEnvironmentInvariantRow(const RawRow& raw, const Baseline& b) {
     Row out{};
     out.rawLabel = raw.rawLabel;
+    memset(out.features, 0, sizeof(out.features));
 
-    float gas1_raw = raw.sensors[3];
-    float gas2_raw = raw.sensors[7];
+    uint16_t idx=0;
 
-    float gas1_response = (b.gas1 > 0) ? gas1_raw / b.gas1 : 1.0f;
-    float gas2_response = (b.gas2 > 0) ? gas2_raw / b.gas2 : 1.0f;
-    float gas_cross_ratio = (gas2_raw > 0) ? gas1_raw / gas2_raw : 1.0f;
-    float gas_diff_abs = fabsf(gas1_response - gas2_response);
-    float delta_temp_abs = fabsf(raw.sensors[0] - raw.sensors[4]);
-    float delta_hum_abs  = fabsf(raw.sensors[1] - raw.sensors[5]);
-    float delta_pres_abs = fabsf(raw.sensors[2] - raw.sensors[6]);
-    float log_gas_cross = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
-    float gas_cross = gas1_response * gas2_response;
-    float gas_ndiff = (gas_cross_ratio > 0.01f) ? gas_diff_abs / gas_cross_ratio : 0.0f;
-    float hum_temp_i = delta_hum_abs / (delta_temp_abs + 0.01f);
-    float gas_ratio = (gas2_response > 0.01f) ? gas1_response / gas2_response : 1.0f;
+    float gas1_resp[NUM_HEATER_STEPS];
+    float gas2_resp[NUM_HEATER_STEPS];
 
-    out.features[0]  = gas1_response;
-    out.features[1]  = gas2_response;
-    out.features[2]  = gas_cross_ratio;
-    out.features[3]  = gas_diff_abs;
-    out.features[4]  = delta_temp_abs;
-    out.features[5]  = delta_hum_abs;
-    out.features[6]  = delta_pres_abs;
-    out.features[7]  = log_gas_cross;
-    out.features[8]  = gas_cross;
-    out.features[9]  = gas_ndiff;
-    out.features[10] = hum_temp_i;
-    out.features[11] = gas_ratio;
+    for(int i=0; i<NUM_HEATER_STEPS;i++){
+        gas1_resp[i] = raw.gas1[i]/b.gas1_steps[i];
+        gas2_resp[i] = raw.gas2[i]/b.gas2_steps[i];
+        out.features[idx++] = gas1_resp[i];
+    }
+    for(int i=0; i<NUM_HEATER_STEPS;i++){
+        out.features[idx++] = gas2_resp[i];
+    }
+
+    for(int i=0; i<NUM_HEATER_STEPS;i++){
+        out.features[idx++] = (gas2_resp[i] > 0.01f)? gas1_resp[i] / gas2_resp[i] : 1.0f;
+    }
+
+    out.features[idx++] = localSlope(gas1_resp, NUM_HEATER_STEPS);
+    out.features[idx++] = localSlope(gas2_resp, NUM_HEATER_STEPS);
+
+    int half= NUM_HEATER_STEPS / 2;
+    out.features[idx++] = localSlope(gas1_resp + half, NUM_HEATER_STEPS-half)-localSlope(gas1_resp, half);
+    out.features[idx++] = localSlope(gas2_resp + half, NUM_HEATER_STEPS - half)- localSlope(gas2_resp, half);
+
+    out.features[idx++] = fabsf(raw.temp1 - raw.temp2);
+    out.features[idx++] = fabsf(raw.hum1  - raw.hum2);
+    out.features[idx++] = fabsf(raw.pres1 - raw.pres2);
 
     for(int i = 0; i < FEATURE_COUNT; i++){
         if(FEATURE_STDS[i] > 1e-6f){
@@ -192,7 +265,7 @@ static const char* nameForClass(uint8_t cls) {
     return "unknown";
 }
 
-static bool parseCsv(const std::string& path,std::vector<RawRow>& dataRows,std::vector<RawRow>& calibrationRows) {
+static bool parseCsv(const std::string& path,std::vector<RawRow>& dataRows,std::vector<RawRow>& calibrationRows, int& detectedGasSteps) {
     std::ifstream f(path);
     if(!f.is_open()){
         std::cerr<< "Failed to open "<<path << "\n";
@@ -200,53 +273,96 @@ static bool parseCsv(const std::string& path,std::vector<RawRow>& dataRows,std::
     }
 
     std::string line;
-    if(!std::getline(f,line)) return false;
-
-    bool hasAlpha = false;
-    for(char c : line){
-        if (std::isalpha(static_cast<unsigned char>(c))) { 
-            hasAlpha = true; 
-            break; 
-        }
-    }
-
-    if(!hasAlpha){
-        f.clear();
-        f.seekg(0);
-    }
+    bool headerParsed = false;
+    int labelCol = 1;
+    int featureStartCol = 2;
+    int numGasSteps = 1;
 
     while(std::getline(f, line)){
-        if (line.empty()) continue;
+        if(line.empty()) continue;
+
         std::vector<std::string> fields;
         std::stringstream ss(line);
         std::string cell;
-        while (std::getline(ss, cell, ',')) {
-            fields.push_back(cell);
+        while(std::getline(ss, cell, ',')){
+            fields.push_back(trim(cell));
         }
-        if (fields.size() < 10) continue;
+
+        if(!headerParsed) {
+            bool hasAlpha = false;
+            for(char c : line){
+                if(std::isalpha(static_cast<unsigned char>(c))){
+                    hasAlpha = true;
+                    break;
+                }
+            }
+
+            if(hasAlpha) {
+                for(size_t i = 0; i < fields.size(); i++){
+                    std::string col = toLower(fields[i]);
+                    if(col == "label") labelCol = i;
+                    if(col == "temp1") featureStartCol = i;
+                }
+
+                int gasCount = 0;
+                for(size_t i = 0; i < fields.size(); i++){
+                    std::string col = toLower(fields[i]);
+                    if(col.find("gas1_") != std::string::npos) gasCount++;
+                }
+                numGasSteps =(gasCount>1)?gasCount:1;
+
+                std::cout << "Header: label col=" << labelCol << ", features col=" << featureStartCol<< ", gas steps=" << numGasSteps << "\n";
+
+                headerParsed = true;
+                continue;
+            }
+            headerParsed = true;
+            //don't continue
+        }
+
+        int colsPerSensor = 3 + numGasSteps;
+        int requiredCols = featureStartCol + 2 * colsPerSensor;
+        if((int)fields.size() < requiredCols) continue;
 
         RawRow row{};
-        row.rawLabel = (fields.size() > 1) ? fields[1] : "";
-        auto toFloat = [](const std::string& s) {
-            return static_cast<float>(std::atof(s.c_str()));
+        row.rawLabel =(labelCol<(int)fields.size())?fields[labelCol]:"";
+
+        int col = featureStartCol;
+        auto toF = [&](int c) -> float {
+            return(c < (int)fields.size())? static_cast<float>(std::atof(fields[c].c_str())): 0.0f;
         };
-        row.sensors[0] = toFloat(fields[2]);  // temp1
-        row.sensors[1] = toFloat(fields[3]);  // hum1
-        row.sensors[2] = toFloat(fields[4]);  // pres1
-        row.sensors[3] = toFloat(fields[5]);  // gas1_0
-        row.sensors[4] = toFloat(fields[6]);  // temp2
-        row.sensors[5] = toFloat(fields[7]);  // hum2
-        row.sensors[6] = toFloat(fields[8]);  // pres2
-        row.sensors[7] = toFloat(fields[9]);  // gas2_0
+
+        row.temp1 = toF(col++);
+        row.hum1= toF(col++);
+        row.pres1=toF(col++);
+
+        for(int g = 0; g < numGasSteps; g++){
+            row.gas1[g] = toF(col++);
+        }
+        for(int g = numGasSteps; g < NUM_HEATER_STEPS; g++){
+            row.gas1[g] = row.gas1[0];
+        }
+
+        row.temp2 = toF(col++);
+        row.hum2  = toF(col++);
+        row.pres2 = toF(col++);
+        for(int g = 0; g < numGasSteps; g++) {
+            row.gas2[g] = toF(col++);
+        }
+        for(int g = numGasSteps; g < NUM_HEATER_STEPS; g++){
+            row.gas2[g] = row.gas2[0];
+        }
 
         const std::string normLabel = normaliseLabel(row.rawLabel);
         if(normLabel == "calibration" || normLabel == "baseline" || normLabel == "ambient"){
             calibrationRows.push_back(row);
         }
-        else{
+        else {
             dataRows.push_back(row);
         }
     }
+
+    detectedGasSteps = numGasSteps;
     return !(dataRows.empty() && calibrationRows.empty());
 }
 
@@ -258,7 +374,9 @@ int main(int argc, char** argv) {
 
     std::vector<RawRow> dataRows;
     std::vector<RawRow> calibrationRows;
-    if(!parseCsv(argv[1], dataRows, calibrationRows)){
+    int detectedGasSteps = 1;
+
+    if(!parseCsv(argv[1], dataRows, calibrationRows, detectedGasSteps)){
         std::cerr << "No data parsed from CSV.\n";
         return 1;
     }
@@ -270,7 +388,14 @@ int main(int argc, char** argv) {
 
     Baseline base = computeBaseline(calibrationRows);
 
-    std::cout << "Calibration medians -> gas1: " << base.gas1<< ", gas2: " << base.gas2<< " (from " << calibrationRows.size() << " calibration rows)\n";
+    std::cout << "Calibration from " << calibrationRows.size() << " rows:\n";
+    for(int s = 0; s < NUM_HEATER_STEPS; s++) {
+        std::cout << "  Step " << s << ": gas1=" << std::fixed << std::setprecision(0)<< base.gas1_steps[s] << ", gas2=" << base.gas2_steps[s] << "\n";
+    }
+
+    if(detectedGasSteps == 1) {
+        std::cout << "\nWARNING: Old single-step CSV detected. "<< "All gas steps filled from step 0.\n"<< "Multi-step discrimination will be limited.\n\n";
+    }
 
     //transform data rows
     std::vector<Row> rows;
@@ -291,8 +416,8 @@ int main(int argc, char** argv) {
         std::cout << "Mean z-scored features:\n";
         for(int i = 0; i < FEATURE_COUNT; i++){
             float mean = featSum[i] * invN;
-            std::cout << "  [" << i << "] " << std::setw(15) << FEATURE_NAMES[i]
-                      << " = " << std::fixed << std::setprecision(4) << mean;
+            std::cout << "  [" << std::setw(2) << i << "] "<< std::setw(12) << shortFeatureName(i)<< " = " << std::fixed << std::setprecision(4) << mean;
+
             if(fabsf(mean) > 3.0f) std::cout << "  *** OOD WARNING ***";
             std::cout << "\n";
         }
@@ -489,6 +614,31 @@ int main(int argc, char** argv) {
     std::cout << "DT: " << std::fixed << std::setprecision(3) << dtContrib << "\n";
     std::cout << "KNN: " << knnContrib << "\n";
     std::cout << "RF: " << rfContrib << "\n";
+
+
+    //per step variance
+    if(detectedGasSteps>1){
+        std::cout<<"\n===Per-step Gas Response Variance===\n";
+        for(int i=0; i<NUM_HEATER_STEPS;i++){
+            float s1=0.0f,sq1=0.0f;
+            float s2=0.0f,sq2=0.0f;
+
+            for(const auto &r : rows){
+                s1 += r.features[i];
+                sq1 += r.features[i]*r.features[i];
+                s2 += r.features[10+i];
+                sq2 += r.features[i+10]*r.features[i+10];
+            }
+            float n=static_cast<float>(rows.size());
+            float m1=s1/n, v1=(sq1/n) - (m1*m1);
+            float m2=s2/n, v2=(sq2/n) - (m2*m2);
+            std::cout << "  Step " << i
+                    << "  gas1: mean_z=" << std::fixed << std::setprecision(3) << m1
+                    << " var=" << std::setprecision(4) << v1
+                    << "  gas2: mean_z=" << m2
+                    << " var=" << v2 << "\n";
+        }
+    }
 
     return 0;
 }

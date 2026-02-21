@@ -213,11 +213,9 @@ bool BME688Handler::setCustomHeaterProfile(const uint16_t *temperatures, const u
 
 bool BME688Handler::setOperatingMode(bme688_mode_t mode){
     _current_mode = mode;
-
     bool success =true;
 
     switch(mode){
-
         case MODE_FORCED:
             DEBUG_PRINTLN("[BME688] Operating mode set to FORCED");
             if(_primary_ready){
@@ -229,10 +227,13 @@ bool BME688Handler::setOperatingMode(bme688_mode_t mode){
             break;
 
         case MODE_PARALLEL:
-            DEBUG_PRINTLN("[BME688] Operating mode set to PARALLEL (overridden to FORCED heater-off for ambient)");
-            mode = MODE_FORCED;
-            _current_mode = MODE_FORCED;
-            success &= setOperatingMode(MODE_FORCED);
+            DEBUG_PRINTLN("[BME688] Operating mode set to PARALLEL");
+            if(_primary_ready){
+                success &= configureParallelMode(_sensor_primary);
+            }
+            if(_secondary_ready){
+                success &= configureParallelMode(_sensor_secondary);
+            }
             break;
         
         case MODE_SEQUENTIAL:
@@ -263,12 +264,18 @@ bool BME688Handler::configureForcedMode(Bme68x &sensor){
 }
 
 bool BME688Handler::configureParallelMode(Bme68x &sensor){
-    uint16_t zeroTemp[1] = {0};
-    uint16_t zeroDur[1] = {0};
-    sensor.setHeaterProf(zeroTemp, zeroDur, 1);
+    if(_current_profile.steps > 0){
+    sensor.setHeaterProf(_current_profile.temperatures, _current_profile.durations, _current_profile.steps);
+    }
+    else{
+        uint16_t tempBuf[BME688_NUM_HEATER_STEPS];
+        uint16_t durBuf[BME688_NUM_HEATER_STEPS];
+        memcpy(tempBuf,DEFAULT_HEATER_TEMPERATURES,sizeof(tempBuf));
+        memcpy(durBuf,DEFAULT_HEATER_DURATIONS, sizeof(durBuf));
+        sensor.setHeaterProf(tempBuf, durBuf, BME688_NUM_HEATER_STEPS);
+    }
     sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
-    sensor.setOpMode(BME68X_FORCED_MODE);
-    return !sensor.checkStatus();
+    return sensor.checkStatus()!=BME68X_ERROR;
 }
 
 //===========================================================================================================
@@ -417,61 +424,80 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
     bool seen[BME688_NUM_HEATER_STEPS];
     memset(seen, 0, sizeof(seen));    
 
-    uint8_t readings=0;
+    const uint8_t steps=(_current_profile.steps>0)? _current_profile.steps:BME688_NUM_HEATER_STEPS;
 
-    //set parallel mode
+    if(_current_profile.steps > 0){
+    sensor.setHeaterProf(_current_profile.temperatures, _current_profile.durations, _current_profile.steps);
+    }
+    else{
+        uint16_t tempBuf[BME688_NUM_HEATER_STEPS];
+        uint16_t durBuf[BME688_NUM_HEATER_STEPS];
+        memcpy(tempBuf,DEFAULT_HEATER_TEMPERATURES,sizeof(tempBuf));
+        memcpy(durBuf,DEFAULT_HEATER_DURATIONS, sizeof(durBuf));
+        sensor.setHeaterProf(tempBuf, durBuf, BME688_NUM_HEATER_STEPS);
+    }
+
+    sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
+
     sensor.setOpMode(BME68X_PARALLEL_MODE);
 
-    uint32_t dur = 0;
-
-    for(uint8_t i=0; i<_current_profile.steps; i++){
-        dur += _current_profile.durations[i];
+    //get timeout
+    uint32_t heatDur=0;
+    for(uint8_t i=0; i<steps; i++){
+        heatDur+= (_current_profile.steps > 0)? _current_profile.durations[i]: DEFAULT_HEATER_DURATIONS[i];
     }
-    if(dur ==0){
-        dur = (uint32_t)_current_profile.steps * BME688_HEATER_DURATION;
+    if(heatDur==0){
+        heatDur = (uint32_t)steps * BME688_HEATER_DURATION;
     }
 
     const uint32_t perStepUs = sensor.getMeasDur(BME68X_PARALLEL_MODE);
-    const uint32_t perStepMs = (perStepUs + 999U) / 1000U; 
-    const uint32_t sweepMs = (perStepMs + 1U) * _current_profile.steps; 
-    const uint32_t timeout = millis() + dur + sweepMs + SCAN_EXTRA_TIMEOUT_MS;
+    const uint32_t perStepMs = (perStepUs + 999U) / 1000U;
+    const uint32_t sweepMs = (perStepMs + 10U) * steps;
+    const uint32_t timeout = millis() + heatDur + sweepMs + SCAN_EXTRA_TIMEOUT_MS;
+    uint32_t lastProgressMs=millis();
 
-    uint32_t lastProgressMs = millis();
-    while(scan.validReadings < _current_profile.steps && millis() < timeout){
-        if(perStepUs>=1000U){
-            delay((perStepUs+999U) /1000U);
-        } 
-        else{
-            delayMicroseconds(perStepUs);
+    while(scan.validReadings< steps&& millis()<timeout){
+        //wait
+        if(perStepMs >= 1){
+            delay(perStepMs);
+        } else {
+            delay(1);
         }
         yield();
 
-        readings = sensor.fetchData();
+        uint8_t readings = sensor.fetchData();
 
-        for(uint8_t i=0; i< readings; i++){
+        for(uint8_t i = 0; i < readings; i++){
             bme68xData data;
             sensor.getData(data);
             uint8_t idx = data.gas_index;
 
+            //
             if(idx < BME688_NUM_HEATER_STEPS && !seen[idx]){
-                scan.temperatures[idx] = data.temperature;
-                scan.humidities[idx] = data.humidity;
-                scan.pressures[idx] = data.pressure / 100.0f; //hPa
-                scan.gas_resistances[idx] = data.gas_resistance;
-                seen[idx] = true;
-                scan.validReadings++;
-                lastProgressMs = millis();
+                //check gas_valid and heat_stab flags
+                if((data.status & BME68X_GASM_VALID_MSK)&&(data.status & BME68X_HEAT_STAB_MSK)){
+                    scan.temperatures[idx] = data.temperature;
+                    scan.humidities[idx] = data.humidity;
+                    scan.pressures[idx] = data.pressure / 100.0f;
+                    scan.gas_resistances[idx] = data.gas_resistance;
+                    seen[idx] = true;
+                    scan.validReadings++;
+                    lastProgressMs = millis();
+                    
+                    DEBUG_VERBOSE_PRINTF("[BME688] Step %d: gas=%.0f ohms\n",idx, data.gas_resistance);
+                }
             }
         }
 
+        // Stall detection
         if((millis() - lastProgressMs) >= SCAN_PROGRESS_GUARD_MS){
-            DEBUG_PRINTLN("[BME688] Scan stalled, exiting early");
+            DEBUG_PRINTF("[BME688] Scan stalled at %d/%d steps\n",scan.validReadings, steps);
             break;
         }
     }
 
-    scan.complete = (scan.validReadings >= _current_profile.steps);
-    DEBUG_VERBOSE_PRINTF("[BME688] Sensor scan complete. Valid readings: %d/%d\n", scan.validReadings, _current_profile.steps);
+    scan.complete = (scan.validReadings >= steps);
+    DEBUG_VERBOSE_PRINTF("[BME688] Sensor scan complete. Valid readings: %d/%d\n", scan.validReadings, steps);
     return scan.validReadings > 0;
 }
 
@@ -572,42 +598,50 @@ bool BME688Handler::beginNonBlockingScan(){
 
     const uint8_t steps = (_current_profile.steps > 0) ? _current_profile.steps : BME688_NUM_HEATER_STEPS;
 
-    auto computeTimeout = [&](Bme68x &sensor){
-        uint32_t heaterDur = 0;
+    auto setupSensor = [&](Bme68x &sensor, scan_context_t &ctx){
+        if(_current_profile.steps > 0){
+        sensor.setHeaterProf(_current_profile.temperatures,_current_profile.durations,_current_profile.steps);
+    }
+    else{
+        uint16_t tempBuf[BME688_NUM_HEATER_STEPS];
+        uint16_t durBuf[BME688_NUM_HEATER_STEPS];
+        memcpy(tempBuf,DEFAULT_HEATER_TEMPERATURES,sizeof(tempBuf));
+        memcpy(durBuf, DEFAULT_HEATER_DURATIONS,sizeof(durBuf));
+        sensor.setHeaterProf(tempBuf, durBuf, BME688_NUM_HEATER_STEPS);
+    }
+
+    sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
+
+        //calc timeout
+        uint32_t heatDur=0;
         for(uint8_t i=0; i<steps; i++){
-            heaterDur += _current_profile.durations[i];
+            heatDur+= (_current_profile.steps > 0)? _current_profile.durations[i]: DEFAULT_HEATER_DURATIONS[i];
         }
-        if(heaterDur == 0){
-            heaterDur = (uint32_t)steps * BME688_HEATER_DURATION;
+        if(heatDur==0){
+            heatDur = (uint32_t)steps * BME688_HEATER_DURATION;
         }
 
-        //getMeasDur returns microseconds
         uint32_t perStepUs = sensor.getMeasDur(BME68X_PARALLEL_MODE);
-        uint32_t perStepMs = (perStepUs + 999U) / 1000U; //ceil to ms
-        uint32_t sweepMs = steps * (perStepMs + 10U);
-        return millis() + heaterDur + sweepMs + SCAN_EXTRA_TIMEOUT_MS;
+        uint32_t perStepMs=(perStepUs+999U)/1000U;
+        uint32_t sweepMs = (perStepMs + 10U) * steps;
+
+        ctx.active = true;
+        ctx.expectedSteps = steps;
+        ctx.startMs = millis();
+        ctx.timeoutMs=millis()+heatDur+sweepMs+SCAN_EXTRA_TIMEOUT_MS;
+        ctx.lastProgressMs = ctx.startMs;
+
+        sensor.setOpMode(BME68X_PARALLEL_MODE);
     };
 
     if(_primary_ready){
         resetScanContext(_primary_scan_ctx);
-        _primary_scan_ctx.active = true;
-        _primary_scan_ctx.expectedSteps = steps;
-        _primary_scan_ctx.startMs = millis();
-        _primary_scan_ctx.timeoutMs = computeTimeout(_sensor_primary);
-        _primary_scan_ctx.lastProgressMs = _primary_scan_ctx.startMs;
-        configureParallelMode(_sensor_primary);
-        _sensor_primary.setOpMode(BME68X_PARALLEL_MODE);
+        setupSensor(_sensor_primary, _primary_scan_ctx);
     }
 
     if(_secondary_ready){
         resetScanContext(_secondary_scan_ctx);
-        _secondary_scan_ctx.active = true;
-        _secondary_scan_ctx.expectedSteps = steps;
-        _secondary_scan_ctx.startMs = millis();
-        _secondary_scan_ctx.timeoutMs = computeTimeout(_sensor_secondary);
-        _secondary_scan_ctx.lastProgressMs = _secondary_scan_ctx.startMs;
-        configureParallelMode(_sensor_secondary);
-        _sensor_secondary.setOpMode(BME68X_PARALLEL_MODE);
+        setupSensor(_sensor_secondary, _secondary_scan_ctx);
     }
 
     _scan_active = _primary_scan_ctx.active || _secondary_scan_ctx.active;

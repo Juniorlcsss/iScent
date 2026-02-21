@@ -443,7 +443,12 @@ void handleStateMachine(){
 
             //cool before taking ambient baseline
             if(ambientSettling){
-                if(now - ambientSettleStartMs < AMBIENT_SETTLE_MS){
+                if(now - ambientSettleStartMs < AMBIENT_SETTLE_MS+10000UL){
+                    if(now-lastSampleTime >=BME688_SAMPLE_RATE){
+                        dual_sensor_data_t settleData;
+                        sensors.readParallelScan(settleData);
+                        lastSampleTime = now;
+                    }
                     break;
                 }
                 ambientSettling = false;
@@ -453,24 +458,43 @@ void handleStateMachine(){
             }
 
             if(!ambientSettling && (now - lastSampleTime) >= AMBIENT_SAMPLE_INTERVAL_MS){
-                if(performSampling()){
-                    lastSampleTime = now;
-                    if(ambientSkipSamples > 0){
-                        ambientSkipSamples--; //discard post-settle samples
-                    } else {
+                dual_sensor_data_t baselineData;
+                if(sensors.readParallelScan(baselineData)){
+                    lastSampleTime=now;
+                    dual_sensor_data_t ambientData;
+
+                    if(sensors.performFullScan(ambientData)){
+                        //merge T/H/P and gas
+                        baselineData.primary.temperatures[0] = ambientData.primary.temperatures[0];
+                        baselineData.primary.humidities[0]= ambientData.primary.humidities[0];
+                        baselineData.primary.pressures[0]= ambientData.primary.pressures[0];
+                        baselineData.secondary.temperatures[0] = ambientData.secondary.temperatures[0];
+                        baselineData.secondary.humidities[0] = ambientData.secondary.humidities[0];
+                        baselineData.secondary.pressures[0]= ambientData.secondary.pressures[0];
+                    }
+                    currentSensorData = baselineData;
+
+                    if(ambientSkipSamples>0){
+                        ambientSkipSamples--;
+                        logger.logCalibDebug("Baseline capture - skipping sample after settle");
+                    }
+                    else{
                         ml.updateBaselineCalibration(currentSensorData);
+                        logger.logCalibDebug("Baseline capture - sample added to calibration");
+                    }
+
+                    if(loggingActive){
+                        logger.logCalibDebug(String("Baseline capture - sample logged with label ")+String(LOG_LABEL_AMBIENT));
+                        logger.logEntry(currentSensorData, nullptr);
                     }
                 }
             }
 
             bool ambientDurationElapsed = (!ambientSettling && ambientCaptureStartMs > 0 && (now - ambientCaptureStartMs) >= AMBIENT_CAPTURE_DURATION_MS);
-
-
-             
+            
             if(ambientDurationElapsed && ml.isBaselineCalibrationComplete()){
                 DEBUG_PRINTLN(F("[STATE] Ambient baseline capture complete. Starting calibration."));
                 logger.setActiveLabel(-1); // stop tagging ambient
-                sensors.setDefaultHeaterProfile(); // restore heater for calibration
                 ambientSettling = false;
                 ambientCaptureStartMs = 0;
                 ambientSkipSamples = 0;
@@ -660,7 +684,7 @@ void enterState(system_state_t newState){
 
         case STATE_ML_BASELINE_CALIB:
             //label as ambient
-            sensors.applyHeaterOffProfile();
+            sensors.setDefaultHeaterProfile();
             display.setMode(DISPLAY_MODE_CALIBRATION);
             logger.setActiveLabel(LOG_LABEL_AMBIENT);
 
@@ -672,7 +696,7 @@ void enterState(system_state_t newState){
             ambientSettleStartMs = millis();
             ambientCaptureStartMs = 0;
             ambientSettling = true;
-            ambientSkipSamples = AMBIENT_SKIP_AFTER_SETTLE;
+            ambientSkipSamples = AMBIENT_SKIP_AFTER_SETTLE+3;
             lastSampleTime = 0;
             break;
 

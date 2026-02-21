@@ -100,15 +100,21 @@ bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data) {
     uint16_t idx = 0;
     memset(_feature_buffer.features, 0, sizeof(_feature_buffer.features));
 
+    //store all heater steps
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        _feature_buffer.features[idx++] = sensor_data.primary.gas_resistances[i];
+    }
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        _feature_buffer.features[idx++] = sensor_data.secondary.gas_resistances[i];
+    }
+
     // Store RAW values — normaliseFeatures will transform them
     _feature_buffer.features[idx++] = sensor_data.primary.temperatures[0];
     _feature_buffer.features[idx++] = sensor_data.primary.humidities[0];
     _feature_buffer.features[idx++] = sensor_data.primary.pressures[0];
-    _feature_buffer.features[idx++] = sensor_data.primary.gas_resistances[0];
     _feature_buffer.features[idx++] = sensor_data.secondary.temperatures[0];
     _feature_buffer.features[idx++] = sensor_data.secondary.humidities[0];
     _feature_buffer.features[idx++] = sensor_data.secondary.pressures[0];
-    _feature_buffer.features[idx++] = sensor_data.secondary.gas_resistances[0];
 
     _feature_buffer.featureCount = idx;
     
@@ -1145,55 +1151,66 @@ void MLInference::normaliseFeatures(ml_feature_buffer_t& features, const baselin
         DEBUG_PRINTLN(F("[MLInference] Baseline not valid, skipping normalization"));
         return;
     }
-    
+
+    //gas raw
+    float gas1_raw[BME688_NUM_HEATER_STEPS];
+    float gas2_raw[BME688_NUM_HEATER_STEPS];
+    uint16_t srcIdx = 0;
+
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        gas1_raw[i] = features.features[srcIdx++];
+    }
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        gas2_raw[i] = features.features[srcIdx++];
+    }
     //raw values
-    float temp1_raw = features.features[0];
-    float hum1_raw  = features.features[1];
-    float pres1_raw = features.features[2];
-    float gas1_raw  = features.features[3];
-    float temp2_raw = features.features[4];
-    float hum2_raw  = features.features[5];
-    float pres2_raw = features.features[6];
-    float gas2_raw  = features.features[7];
-    
-    //gas ratios
-    float gas1_response = (baseline.gas1_baseline > 0) ? gas1_raw / baseline.gas1_baseline : 1.0f;
-    float gas2_response = (baseline.gas2_baseline > 0) ? gas2_raw / baseline.gas2_baseline : 1.0f;
-    
-    //cross-sensor gas ratio
-    float gas_cross_ratio = (gas2_raw > 0) ? gas1_raw / gas2_raw : 1.0f;
-    
-    //differentials
-    float gas_response_diff = gas1_response - gas2_response;
-    float delta_temp = temp1_raw - temp2_raw;
-    float delta_hum  = hum1_raw - hum2_raw;
-    float delta_pres = pres1_raw - pres2_raw;
-    
-    //Log cross-ratio
-    float log_gas_cross = logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f);
+    float temp1_raw = features.features[srcIdx++];
+    float hum1_raw  = features.features[srcIdx++];
+    float pres1_raw = features.features[srcIdx++];
+    float temp2_raw = features.features[srcIdx++];
+    float hum2_raw  = features.features[srcIdx++];
+    float pres2_raw = features.features[srcIdx++];
 
-    float gas_cross = gas1_response * gas2_response;
-    float gas_diff_abs = fabsf(gas1_response - gas2_response);
+    uint16_t featureIdx = 0;
 
-    float delta_temp_abs = fabsf(temp1_raw - temp2_raw);
-    float delta_hum_abs  = fabsf(hum1_raw - hum2_raw);
-    
-    features.features[0] = gas1_response;
-    features.features[1] = gas2_response;
-    features.features[2] = gas_cross_ratio;
-    features.features[3] = fabsf(gas1_response - gas2_response);
-    features.features[4] = fabsf(temp1_raw - temp2_raw);
-    features.features[5] = fabsf(hum1_raw - hum2_raw);
-    features.features[6] = fabsf(pres1_raw - pres2_raw);
-    features.features[7] = fabsf(logf(gas_cross_ratio > 0 ? gas_cross_ratio : 1e-6f));
-    features.features[8]= gas_cross;
-    features.features[9]= (gas_cross_ratio>0.01f) ? gas_diff_abs/gas_cross_ratio :0.0f;
-    features.features[10]= delta_hum_abs / (delta_temp_abs + 0.01f);
-    features.features[11]= (gas2_response > 0.01f) ? gas1_response / gas2_response : 1.0f;
-    features.featureCount = 12;
-    
+    float gas1_resp[BME688_NUM_HEATER_STEPS];
+    float gas2_resp[BME688_NUM_HEATER_STEPS];
+
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        gas1_resp[i] = gas1_raw[i]/baseline.gas1_step_baselines[i];
+        gas2_resp[i] = gas2_raw[i]/baseline.gas2_step_baselines[i];
+        features.features[featureIdx++] = gas1_resp[i];
+    }
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        features.features[featureIdx++] = gas2_resp[i];
+    }
+
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        features.features[featureIdx++]=(gas2_resp[i]>0.01f)? gas1_resp[i]/gas2_resp[i] : 1.0f;
+    }
+
+    //shape
+    features.features[featureIdx++]= computeSlope(gas1_resp, BME688_NUM_HEATER_STEPS);
+    features.features[featureIdx++]= computeSlope(gas2_resp, BME688_NUM_HEATER_STEPS);
+
+    //curvature
+    uint8_t half = BME688_NUM_HEATER_STEPS / 2;
+    float s1_low =computeSlope(gas1_resp, half);
+    float s1_high = computeSlope(gas1_resp + half, BME688_NUM_HEATER_STEPS - half);
+    float s2_low = computeSlope(gas2_resp, half);
+    float s2_high = computeSlope(gas2_resp + half, BME688_NUM_HEATER_STEPS - half);
+    features.features[featureIdx++]= s1_high - s1_low;
+    features.features[featureIdx++]= s2_high - s2_low;
+
+    //environmental differentials
+    features.features[featureIdx++]=fabsf(temp1_raw-temp2_raw);
+    features.features[featureIdx++]=fabsf(hum1_raw-hum2_raw);
+    features.features[featureIdx++]=fabsf(pres1_raw-pres2_raw);
+
+    features.featureCount = featureIdx;
+
     //z-score
-    for (int i = 0; i < TOTAL_ML_FEATURES; i++) {
+    for (int i = 0; i < features.featureCount; i++) {
         if (FEATURE_STDS[i] > 1e-6f) {
             features.features[i] = (features.features[i] - FEATURE_MEANS[i]) / FEATURE_STDS[i];
         }

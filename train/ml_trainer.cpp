@@ -64,15 +64,60 @@ void printConfusionMatrix(const ml_metrics_t &m){
     }
 }
 
-void printFeatureNames(){
-    const char* names[]={
-        "gas1_response", "gas2_response", "gas_cross_ratio", "gas_response_diff",
-        "delta_temp", "delta_hum", "delta_pres", "log_gas_cross", "gas_cross", "gas_ndiff", "hum_temp_i", "gas_asym"
-    };
-    std::cout << "\nFeatures (" << CSV_FEATURE_COUNT << "):" << std::endl;
-    for(int i=0; i< CSV_FEATURE_COUNT; i++){
-        std::cout<< "[" << i << "] " << names[i] << std::endl;
+void printFeatureNames() {
+    std::cout<<"\nFeatures:"<< CSV_FEATURE_COUNT <<std::endl;
+    for(int i=0; i<10;i++){
+        std::cout<<"  ["<< i <<"] gas1_resp_step"<< i <<std::endl;
     }
+    for(int i=0; i<10;i++){
+        std::cout<<"  ["<< (10+i) <<"] gas2_resp_step"<< i <<std::endl;
+    }
+    for(int i = 0; i < 10; i++){
+        std::cout << "[" << (20+i) << "] cross_ratio_step" << i << std::endl;
+    }
+    std::cout << "[30] slope1\n[31] slope2\n"<<"[32] curvature1\n[33] curvature2\n"<<"[34] delta_temp\n[35] delta_hum\n[36] delta_pres"<<std::endl;
+}
+
+
+static const char* shortFeatureName(int idx){
+    static char buf[16];
+    if(idx<10){
+        snprintf(buf, sizeof(buf),"g1_s%d",idx);
+        return buf;
+    }
+    if(idx>=10 && idx<20){
+        snprintf(buf, sizeof(buf),"g2_s%d",idx-10);
+        return buf;
+    }
+    if(idx>=20 && idx<30){
+        snprintf(buf, sizeof(buf),"cr_s%d",idx-20);
+        return buf;
+    }
+    if(idx==30){
+        return "slope1";
+    }
+    if(idx==31){
+        return "slope2";
+    }
+    if(idx==32){
+        return "curvature1";
+    }
+    if(idx==33){
+        return "curvature2";
+    }
+    if(idx==34){
+        return "delta_temp";
+    }
+    if(idx==35){
+        return "delta_hum";
+    }
+    if(idx==36){
+        return "delta_pres";
+    }
+
+    snprintf(buf, sizeof(buf), "f_%d", idx);
+    return buf;
+
 }
 
 int main(int argc, char* argv[]){
@@ -107,9 +152,6 @@ int main(int argc, char* argv[]){
     uint16_t trainCount=0, testCount=0;
     loader.split(trainRatio, trainSet, trainCount, testSet, testCount);
     std::cout << "\n=== Training Feature Statistics ===" << std::endl;
-    const char* fnames[] = {"gas1_resp", "gas2_resp", "gas_cross", "gas_diff",
-    "d_temp", "d_hum", "d_pres", "log_gas_cross",
-    "gas_cross_p", "gas_ndiff", "hum_temp_i", "gas_ratio"};
 
     
     //per class stats
@@ -142,7 +184,7 @@ int main(int argc, char* argv[]){
             float mn = *std::min_element(classFeatures[f].begin(), classFeatures[f].end());
             float mx = *std::max_element(classFeatures[f].begin(), classFeatures[f].end());
             
-            std::cout << "  " << std::setw(8) << fnames[f] 
+            std::cout << "  " << std::setw(8) << shortFeatureName(f)
                     << ": mean=" << std::setw(10) << std::fixed << std::setprecision(4) << mean
                     << " std=" << std::setw(10) << std << " min=" << std::setw(10) << mn 
                     << " max=" << std::setw(10) << mx << std::endl;
@@ -207,8 +249,10 @@ int main(int argc, char* argv[]){
     std::default_random_engine rng(42);
 
     //augment
-    std::normal_distribution<float> gasNoise(0.0f, 0.05f);    //gas features: +-8% noise in z-space
-    std::normal_distribution<float> deltaNoise(0.0f, 0.08f);   // delta features: +-12% noise in z-space
+    std::normal_distribution<float> gasNoise(0.0f, 0.05f);    //gas features: +-% noise in z-space
+    std::normal_distribution<float> ratioNoise(0.0f, 0.04f);
+    std::normal_distribution<float> shapeNoise(0.0f, 0.06f);
+    std::normal_distribution<float> envNoise(0.0f, 0.08f);
 
     uint16_t classCounts[SCENT_CLASS_COUNT] = {0};
     std::vector<std::vector<uint16_t>> classIndices(SCENT_CLASS_COUNT);
@@ -243,18 +287,24 @@ int main(int argc, char* argv[]){
             uint16_t srcIdx = classIndices[c][srcDist(rng)];
             csv_training_sample_t noisy = trainSet[srcIdx];
 
-            noisy.features[0] += gasNoise(rng);   //gas1_response
-            noisy.features[1] += gasNoise(rng);   //gas2_response
-            noisy.features[2] += gasNoise(rng);   //gas_cross_ratio
-            noisy.features[3] += gasNoise(rng);   //gas_response_diff
-            noisy.features[4] += deltaNoise(rng); //delta_temp
-            noisy.features[5] += deltaNoise(rng); //delta_hum
-            noisy.features[6] += deltaNoise(rng); //delta_pres
-            noisy.features[7] += gasNoise(rng);   //log_gas_cross
-            noisy.features[8] += gasNoise(rng);   //gas_cross
-            noisy.features[9] += gasNoise(rng);   //gas_ndiff
-            noisy.features[10] += deltaNoise(rng); //hum_temp_i
-            noisy.features[11] += gasNoise(rng);   //gas_asym
+            for(int i=0; i<10;i++){
+                noisy.features[i] += gasNoise(rng); //gas1
+            }
+
+            for(int i=10; i<20;i++){
+                noisy.features[i] += gasNoise(rng); //gas2
+            }
+
+            for(int i=20; i<30;i++){
+                noisy.features[i] += ratioNoise(rng); //cross ratios
+            }
+
+            for(int i=30; i<34;i++){
+                noisy.features[i] += shapeNoise(rng); //slopes/curvature
+            }
+            for(int i=34; i<37;i++){
+                noisy.features[i] += envNoise(rng); //env diffs
+            }
 
             augmented.push_back(noisy);
         }

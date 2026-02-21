@@ -1,10 +1,7 @@
 #include "data_logger.h"
 #include <ctype.h>
 
-static const char LOG_HEADER[] = "timestamp,label,temp1,hum1,pres1,gas1_0,"
-                                 "temp2,hum2,pres2,gas2_0,"
-                                 "delta_temp,delta_hum,delta_pres,delta_gas,"
-                                 "pred_class,pred_conf,anomaly_score,iaq";
+static const char LOG_HEADER[] = "timestamp,label,temp1,hum1,pres1,delta_temp,delta_hum,delta_pres,delta_gas,pred_class,pred_conf,anomaly_score,iaq";
 
 static const char CALIB_DEBUG_FILE[] = "/calib_debug.txt";
 static const uint32_t CALIB_DEBUG_MIN_INTERVAL_MS = 500;
@@ -520,10 +517,17 @@ bool DataLogger::writeHeader(){
         return false;
     }
 
-    //csv header
-    if(_log_file.println(LOG_HEADER) == 0){
-        return false;
+    _log_file.print("timestamp,label,temp1,hum1,pres1");
+    for(int i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        _log_file.printf(",gas1_%d", i);
     }
+
+    _log_file.print(",temp2,hum2,pres2");
+    for(int i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        _log_file.printf(",gas2_%d", i);
+    }
+
+    _log_file.println(",delta_temp,delta_hum,delta_pres,delta_gas,pred_class,pred_conf,anomaly_score,iaq");
     _log_file.flush();
     return true;
 }
@@ -550,7 +554,7 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     }
 
     //sensor data
-    auto meanOfValid = [](const float* data, uint8_t count){
+    auto checkMean = [](const float* data, uint8_t count)->float{
         if(count==0){
             return 0.0f;
         }
@@ -561,32 +565,28 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
         return sum / (float)count;
     };
 
-    auto checkMean = [&](const float *data, uint8_t count){
-        if(count ==0){
-            return 0.0f;
-        }
-        if(count==1){
-            return data[0];
-        }
-        return meanOfValid(data, count);
-    };
-
+    //primary THP
     _log_file.printf("%.2f,%.2f,%.2f,",
     checkMean(entry.sensor_data.primary.temperatures, entry.sensor_data.primary.validReadings),
     checkMean(entry.sensor_data.primary.humidities, entry.sensor_data.primary.validReadings),
     checkMean(entry.sensor_data.primary.pressures, entry.sensor_data.primary.validReadings));
 
-    //gas primary (step 0 only)
-    _log_file.printf("%.0f,", entry.sensor_data.primary.gas_resistances[0]);
 
-    //secondary sensor
+    //primary all gas steps
+    for(int i=0; i<BME688_NUM_HEATER_STEPS; i++){
+        _log_file.printf(",%.0f", entry.sensor_data.primary.gas_resistances[i]);
+    }
+
+    //secondary THP
     _log_file.printf("%.2f,%.2f,%.2f,",
     checkMean(entry.sensor_data.secondary.temperatures, entry.sensor_data.secondary.validReadings),
     checkMean(entry.sensor_data.secondary.humidities, entry.sensor_data.secondary.validReadings),
     checkMean(entry.sensor_data.secondary.pressures, entry.sensor_data.secondary.validReadings));
 
-    //gas secondary (step 0 only)
-    _log_file.printf("%.0f,", entry.sensor_data.secondary.gas_resistances[0]);
+    //secondary all gas steps
+    for(int i=0; i<BME688_NUM_HEATER_STEPS; i++){
+        _log_file.printf(",%.0f", entry.sensor_data.secondary.gas_resistances[i]);
+    }
 
     //deltas
     _log_file.printf("%.2f,%.2f,%.2f,%.0f,",
