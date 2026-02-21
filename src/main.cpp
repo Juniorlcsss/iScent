@@ -268,12 +268,6 @@ void initialiseSystem(){
     Wire.begin();
     Wire.setClock(I2C_FREQUENCY_HZ);
 
-    //Wire1.setSDA(I2C1_SDA_PIN);
-    //Wire1.setSCL(I2C1_SCL_PIN);
-    //Wire1.begin();
-    //Wire1.setClock(I2C_FREQUENCY_HZ);
-
-
     //init display
     DEBUG_PRINTLN(F("[INIT] Initializing Display..."));
     if(!display.begin(&Wire)){
@@ -334,15 +328,36 @@ void initialiseSystem(){
         ble.startAdvertising();
     }
 
-    //skip idle warmup
-    if(!sensors.getCalibrationData().calibrated){
-        DEBUG_PRINTLN(F("[INIT] Starting ambient baseline/calibration..."));
-        enterState(STATE_ML_BASELINE_CALIB);
-    } else {
-        DEBUG_PRINTLN(F("[INIT] Calibration present; entering IDLE."));
-        display.setMode(DISPLAY_MODE_MENU);
-        enterState(STATE_IDLE);
+    DEBUG_PRINTLN(F("[INIT] Starting sensor warm-up..."));
+    enterState(STATE_WARMUP);
+}
+
+//===========================================================================================================
+//warmup
+//==========================================================================================================
+float getWarmupProgress(){
+    if(currentState!=STATE_WARMUP){
+        return 1.0f;
     }
+
+    uint32_t elapsed = millis() - warmupStartTime;
+    float progress = (float)elapsed / (float)BME688_STABLE_MS;
+    return constrain(progress, 0.0f, 1.0f);
+}
+
+uint32_t getWarmupRemainingSeconds(){
+    if(currentState!=STATE_WARMUP){
+        return 0;
+    }
+    uint32_t elapsed = millis() - warmupStartTime;
+    if(elapsed >= BME688_STABLE_MS){
+        return 0;
+    }
+    return (BME688_STABLE_MS - elapsed)/1000;
+}
+
+bool isSensorWarmedUp(){
+    return (currentState != STATE_WARMUP)&&(millis()- warmupStartTime >= BME688_STABLE_MS||warmupStartTime== 0);
 }
 
 //===========================================================================================================
@@ -356,24 +371,26 @@ void handleStateMachine(){
             break;
         
         case STATE_WARMUP:
-            //wait for warmup
-            if(millis() - warmupStartTime >= BME688_STABLE_MS){
-                DEBUG_PRINTLN(F("[STATE] Warmup complete."));
-                
-                if(!sensors.getCalibrationData().calibrated){
-                    DEBUG_PRINTLN(F("[STATE] Starting ambient baseline before calibration..."));
-                    enterState(STATE_ML_BASELINE_CALIB);
-                }
-                else{
-                    DEBUG_PRINTLN(F("[STATE] Entering IDLE state."));
-                    display.setMode(DISPLAY_MODE_MENU);
-                    enterState(STATE_IDLE);
-                }
-            }
             //sample during warmup :)
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
                 if(performSampling()){
                     lastSampleTime = millis();
+                }
+            }
+
+            //check period
+            if(millis() - warmupStartTime >= BME688_STABLE_MS){
+                DEBUG_PRINTLN(F("[STATE] Warmup complete. Sensors stabilized."));
+                DEBUG_PRINTF("[STATE] Warmup took %lu ms, %lu samples collected\n",millis() - warmupStartTime, sensors.getSampleCount());
+
+                if(!sensors.getCalibrationData().calibrated){
+                    DEBUG_PRINTLN(F("[STATE] No calibration found — starting ambient baseline..."));
+                    enterState(STATE_ML_BASELINE_CALIB);
+                }
+                else{
+                    DEBUG_PRINTLN(F("[STATE] Existing calibration detected. Skipping baseline capture."));
+                    display.setMode(DISPLAY_MODE_MENU);
+                    enterState(STATE_IDLE);
                 }
             }
             break;
@@ -638,13 +655,8 @@ void enterState(system_state_t newState){
     switch(newState){
         case STATE_WARMUP:
             warmupStartTime = millis();
-            {
-                display_mode_t mode = display.getMode();
-                if(mode == DISPLAY_MODE_SPLASH || mode == DISPLAY_MODE_MENU || mode == DISPLAY_MODE_CALIBRATION){
-                    display.setMode(DISPLAY_MODE_MENU);
-                    display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
-                }
-            }
+            display.setMode(DISPLAY_MODE_CALIBRATION);
+            DEBUG_PRINTF("[STATE] Warmup started. Duration: %lu seconds\n",BME688_STABLE_MS / 1000);
             break;
 
         case STATE_IDLE:
@@ -978,7 +990,12 @@ void handleButtons(){
                 default:
                     //
                     if(!collectingLabeled){
-                        logger.setActiveLabel(LOG_LABEL_AMBIENT);
+                        logger.stopLogging();
+                        loggingActive = false;
+                        logger.setActiveLabel(-1);
+                    }
+                    else{
+                        logger.setActiveLabel(currentLabelSelection);
                     }
                     display.setMode(DISPLAY_MODE_MENU);
                     display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
@@ -995,6 +1012,11 @@ void handleButtons(){
     }
 
     if(buttons.wasPressed(BUTTON_SELECT) || buttons.wasLongPressed(BUTTON_SELECT)){
+        if(display.getMode()==DISPLAY_MODE_PREDICTION&&!collectingLabeled){
+            logger.stopLogging();
+            loggingActive = false;
+            logger.setActiveLabel(-1);
+        }
         display.setMode(DISPLAY_MODE_MENU);
         display.showMenu(main_menu_items, MAIN_MENU_COUNT, display.getSelectedMenuIndex());
         updateDisplay();
@@ -1068,7 +1090,8 @@ void handleBLE(){
             enterState(STATE_ML_BASELINE_CALIB);
         }
         else if(cfg.startsWith("LOG:ON")){
-            loggingActive = false;
+            if(!logger.isLogging()) logger.startLogging();
+            loggingActive = true;
         }
         else if(cfg.startsWith("LOG:OFF")){
             logger.stopLogging();
@@ -1108,7 +1131,15 @@ void handleBLE(){
 void updateDisplay(){
     switch(display.getMode()){
         case DISPLAY_MODE_STATUS:
-            display.showStatusScreen(currentState, lastError);
+            if(currentState==STATE_WARMUP){
+                uint32_t remaining= getWarmupRemainingSeconds();
+                char msg[32];
+                snprintf(msg,sizeof(msg),"Warming up... %lum %02lus", remaining/60, remaining%60);
+                display.showCalibrationScreen(getWarmupProgress(), msg);
+            }
+            else{
+                display.showStatusScreen(currentState, lastError);
+            }
             break;
 
         case DISPLAY_MODE_SENSOR_DATA:
@@ -1127,7 +1158,13 @@ void updateDisplay(){
             break;
 
         case DISPLAY_MODE_CALIBRATION:
-            if(currentState == STATE_ML_BASELINE_CALIB){
+            if(currentState == STATE_WARMUP){
+                uint32_t remaining= getWarmupRemainingSeconds();
+                char msg[32];
+                snprintf(msg,sizeof(msg),"Warming up... %lum %02lus", remaining/60, remaining%60);
+                display.showCalibrationScreen(getWarmupProgress(), msg);
+            }
+            else if(currentState == STATE_ML_BASELINE_CALIB){
                 display.showCalibrationScreen(ml.getBaselineCalibrationProgress(), "Ambient Baseline...");
             }
             else if(sensors.isCalibrating()){
@@ -1175,8 +1212,12 @@ void menuActionShowSensorData(){
 }
 
 void menuActionShowPrediction(){
+    if(!isSensorWarmedUp){
+        DEBUG_PRINTLN(F("[MENU] Cannot enter prediction mode: Sensor is still warming up."));
+        display.setMode(DISPLAY_MODE_CALIBRATION);
+        return;
+    }
     predictionSelection = 0;
-
     display.setPredictionSelection(predictionSelection);
     display.setMode(DISPLAY_MODE_PREDICTION);
 
@@ -1196,6 +1237,11 @@ void menuActionShowError(){
 }
 
 void menuActionDataCollection(){
+    if(!isSensorWarmedUp){
+        DEBUG_PRINTLN(F("[MENU] Cannot enter data collection mode: Sensor is still warming up."));
+        display.setMode(DISPLAY_MODE_CALIBRATION);
+        return;
+    }
     display.setMode(DISPLAY_MODE_DATA_COLLECTION);
     refreshDataCollectionMenu();
 }
