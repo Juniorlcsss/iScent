@@ -31,14 +31,6 @@ float lastCalibLoggedProgress = -1.0f;
 uint32_t lastCalibProgressMs = 0;
 float lastCalibProgressVal = -1.0f;
 uint32_t calibStartTime = 0;
-uint32_t ambientSettleStartMs = 0;
-uint32_t ambientCaptureStartMs = 0;
-bool ambientSettling = false;
-uint8_t ambientSkipSamples = 0;
-const uint32_t AMBIENT_SETTLE_MS = 5000UL; 
-const uint32_t AMBIENT_CAPTURE_DURATION_MS = 15000UL; 
-const uint8_t AMBIENT_SKIP_AFTER_SETTLE = 1; 
-const uint32_t AMBIENT_SAMPLE_INTERVAL_MS = 1000UL;
 const uint32_t CALIB_TIMEOUT_MARGIN_MS = 60000UL;
 const uint32_t CALIB_MAX_DURATION_MS = (uint32_t)(BME688_GAS_BASE_SAMPLES * (BME688_SAMPLE_RATE + 500UL)) + CALIB_TIMEOUT_MARGIN_MS;
 
@@ -204,14 +196,11 @@ void setup(){
 }
 
 void ensureLoggingActive(){
-    if(loggingActive){
-        return;
-    }
+    if(loggingActive) return;
+    if(currentState == STATE_WARMUP) return;
 
     uint32_t now = millis();
-    if(now - lastLoggingRetryMs < LOGGING_RETRY_INTERVAL_MS){
-        return;
-    }
+    if(now - lastLoggingRetryMs < LOGGING_RETRY_INTERVAL_MS) return;
     lastLoggingRetryMs = now;
 
     if(logger.startLogging()){
@@ -371,24 +360,23 @@ void handleStateMachine(){
             break;
         
         case STATE_WARMUP:
-            //sample during warmup :)
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
                 if(performSampling()){
                     lastSampleTime = millis();
                 }
             }
 
-            //check period
             if(millis() - warmupStartTime >= BME688_STABLE_MS){
                 DEBUG_PRINTLN(F("[STATE] Warmup complete. Sensors stabilized."));
-                DEBUG_PRINTF("[STATE] Warmup took %lu ms, %lu samples collected\n",millis() - warmupStartTime, sensors.getSampleCount());
+                DEBUG_PRINTF("[STATE] Warmup took %lu ms, %lu samples collected\n",
+                    millis() - warmupStartTime, sensors.getSampleCount());
 
                 if(!sensors.getCalibrationData().calibrated){
-                    DEBUG_PRINTLN(F("[STATE] No calibration found — starting ambient baseline..."));
-                    enterState(STATE_ML_BASELINE_CALIB);
+                    DEBUG_PRINTLN(F("[STATE] No sensor calibration — starting calibration..."));
+                    enterState(STATE_CALIBRATING);
                 }
                 else{
-                    DEBUG_PRINTLN(F("[STATE] Existing calibration detected. Skipping baseline capture."));
+                    DEBUG_PRINTLN(F("[STATE] Calibration loaded. Ready."));
                     display.setMode(DISPLAY_MODE_MENU);
                     enterState(STATE_IDLE);
                 }
@@ -396,7 +384,6 @@ void handleStateMachine(){
             break;
 
         case STATE_CALIBRATING:
-            //
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
                 if(performSampling()){
                     lastSampleTime = millis();
@@ -408,9 +395,10 @@ void handleStateMachine(){
                 uint16_t collected = sensors.getCalibrationCollected();
                 uint16_t target = sensors.getCalibrationTarget();
                 uint32_t now = millis();
-                if((prog -lastCalibLoggedProgress) >=0.05f || (now-lastCalibDebugTime)>=2000){
+                
+                if((prog - lastCalibLoggedProgress) >= 0.05f || (now - lastCalibDebugTime) >= 2000){
                     char buf[96];
-                    snprintf(buf, sizeof(buf), "prog=%.3f samples=%lu", prog, sensors.getSampleCount());
+                    snprintf(buf, sizeof(buf), "prog=%.3f collected=%u/%u", prog, collected, target);
                     logger.logCalibDebug(String(buf));
                     lastCalibLoggedProgress = prog;
                     lastCalibDebugTime = now;
@@ -420,29 +408,29 @@ void handleStateMachine(){
                     lastCalibProgressVal = prog;
                     lastCalibProgressMs = now;
                 }
-                else if(target >0 &&collected+1>= target && (now - lastCalibProgressMs)>3000UL){
+                else if(target > 0 && collected + 1 >= target && (now - lastCalibProgressMs) > 3000UL){
                     logger.logCalibDebug("CALIB_N_MINUS_ONE_FORCE_FINISH");
                     sensors.finishCalibration();
                 }
-                else if(prog >=0.95f && (now - lastCalibProgressMs) > 12000UL){
+                else if(prog >= 0.95f && (now - lastCalibProgressMs) > 12000UL){
                     logger.logCalibDebug("CALIB_NEAR_DONE_FORCE_FINISH");
                     sensors.finishCalibration();
                 }
-                else if(now -lastCalibProgressMs > 45000UL){
+                else if(now - lastCalibProgressMs > 45000UL){
                     char buf[128];
-                    snprintf(buf, sizeof(buf), "CALIB_STALL prog=%.3f dt=%lu err=%s", prog, (unsigned long)(now - lastCalibProgressMs), sensors.getLastErrorString());
+                    snprintf(buf, sizeof(buf), "CALIB_STALL prog=%.3f dt=%lu", 
+                        prog, (unsigned long)(now - lastCalibProgressMs));
                     logger.logCalibDebug(String(buf));
-                    logger.logCalibDebug("CALIB_PARTIAL_SAVE_STALL");
-                    sensors.finishCalibration();        
+                    sensors.finishCalibration();
                     logger.flushCalibDebug();
-                    rp2040.reboot();
+                    enterState(STATE_IDLE);
                 }
 
                 if(calibStartTime > 0 && (now - calibStartTime) > CALIB_MAX_DURATION_MS){
                     logger.logCalibDebug("CALIB_TIMEOUT_SAVE");
-                    sensors.finishCalibration();        //save partial calibration
+                    sensors.finishCalibration();
                     logger.flushCalibDebug();
-                    rp2040.reboot();
+                    enterState(STATE_IDLE);
                 }
             }
 
@@ -451,80 +439,10 @@ void handleStateMachine(){
                 logger.logCalibDebug("CALIB_DONE");
                 logger.flushCalibDebug();
                 logger.flush();
-                rp2040.reboot();
+                display.setMode(DISPLAY_MODE_MENU);
+                enterState(STATE_IDLE);
             }
             break;
-
-        case STATE_ML_BASELINE_CALIB: {
-            uint32_t now = millis();
-
-            //cool before taking ambient baseline
-            if(ambientSettling){
-                if(now - ambientSettleStartMs < AMBIENT_SETTLE_MS+10000UL){
-                    if(now-lastSampleTime >=BME688_SAMPLE_RATE){
-                        dual_sensor_data_t settleData;
-                        sensors.readParallelScan(settleData);
-                        lastSampleTime = now;
-                    }
-                    break;
-                }
-                ambientSettling = false;
-                ambientCaptureStartMs = now;
-                ambientSkipSamples = AMBIENT_SKIP_AFTER_SETTLE;
-                ml.startBaselineCalibration(10);
-            }
-
-            if(!ambientSettling && (now - lastSampleTime) >= AMBIENT_SAMPLE_INTERVAL_MS){
-                dual_sensor_data_t baselineData;
-                if(sensors.readParallelScan(baselineData)){
-                    lastSampleTime=now;
-                    dual_sensor_data_t ambientData;
-
-                    if(sensors.performFullScan(ambientData)){
-                        //merge T/H/P and gas
-                        baselineData.primary.temperatures[0] = ambientData.primary.temperatures[0];
-                        baselineData.primary.humidities[0]= ambientData.primary.humidities[0];
-                        baselineData.primary.pressures[0]= ambientData.primary.pressures[0];
-                        baselineData.secondary.temperatures[0] = ambientData.secondary.temperatures[0];
-                        baselineData.secondary.humidities[0] = ambientData.secondary.humidities[0];
-                        baselineData.secondary.pressures[0]= ambientData.secondary.pressures[0];
-                    }
-                    currentSensorData = baselineData;
-
-                    if(ambientSkipSamples>0){
-                        ambientSkipSamples--;
-                        logger.logCalibDebug("Baseline capture - skipping sample after settle");
-                    }
-                    else{
-                        ml.updateBaselineCalibration(currentSensorData);
-                        logger.logCalibDebug("Baseline capture - sample added to calibration");
-                    }
-
-                    if(loggingActive){
-                        logger.logCalibDebug(String("Baseline capture - sample logged with label ")+String(LOG_LABEL_AMBIENT));
-                        logger.logEntry(currentSensorData, nullptr);
-                    }
-                }
-            }
-
-            bool ambientDurationElapsed = (!ambientSettling && ambientCaptureStartMs > 0 && (now - ambientCaptureStartMs) >= AMBIENT_CAPTURE_DURATION_MS);
-            
-            if(ambientDurationElapsed && ml.isBaselineCalibrationComplete()){
-                DEBUG_PRINTLN(F("[STATE] Ambient baseline capture complete. Starting calibration."));
-                logger.setActiveLabel(-1); // stop tagging ambient
-                ambientSettling = false;
-                ambientCaptureStartMs = 0;
-                ambientSkipSamples = 0;
-                enterState(STATE_CALIBRATING);
-            }
-
-            //progress
-            float calib_progress = ml.getBaselineCalibrationProgress();
-            if(calib_progress > 0){
-                DEBUG_PRINTF("[CALIB] Ambient Baseline Progress: %.1f%%\n", calib_progress * 100.0f);
-            }
-            break; 
-        }
 
         case STATE_IDLE:
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
@@ -631,7 +549,7 @@ void enterState(system_state_t newState){
             sensors.finishCalibration();
             calibStartTime = 0;
             break;
-        
+
         case STATE_LOGGING:
             logger.stopLogging();
             loggingActive = false;
@@ -694,24 +612,6 @@ void enterState(system_state_t newState){
             sensors.startCalibration(BME688_GAS_BASE_SAMPLES);
             break;
 
-        case STATE_ML_BASELINE_CALIB:
-            //label as ambient
-            sensors.setDefaultHeaterProfile();
-            display.setMode(DISPLAY_MODE_CALIBRATION);
-            logger.setActiveLabel(LOG_LABEL_AMBIENT);
-
-            if(!logger.isLogging()){
-                logger.startLogging();
-            }
-
-            loggingActive = true;
-            ambientSettleStartMs = millis();
-            ambientCaptureStartMs = 0;
-            ambientSettling = true;
-            ambientSkipSamples = AMBIENT_SKIP_AFTER_SETTLE+3;
-            lastSampleTime = 0;
-            break;
-
         case STATE_TEMPORAL_COLLECTING:
             ml.startTemporalCollection();
             temporalStartTime = millis();
@@ -746,7 +646,6 @@ void enterState(system_state_t newState){
 
 bool performSampling(){
     const bool needsAmbientRead = (currentState != STATE_CALIBRATING);
-    const bool needsParallelRead = (currentState != STATE_ML_BASELINE_CALIB);
 
     dual_sensor_data_t ambientData;
     bool ambientOk = true;
@@ -758,24 +657,16 @@ bool performSampling(){
         }
     }
 
-    bool parallelOk = true;
-    if(needsParallelRead){
-        parallelOk = sensors.readParallelScan(currentSensorData);
-        
-        if(!parallelOk && sensors.getLastError() != ERROR_NONE){
-            lastError = ERROR_SENSOR_READ;
-        }
+    bool parallelOk = sensors.readParallelScan(currentSensorData);
+    if(!parallelOk && sensors.getLastError() != ERROR_NONE){
+        lastError = ERROR_SENSOR_READ;
     }
 
     if(!ambientOk || !parallelOk){
         return false;
     }
 
-    if(!needsParallelRead){
-        memcpy(&currentSensorData, &ambientData, sizeof(currentSensorData));
-    }
-
-    if(needsAmbientRead && needsParallelRead){
+    if(needsAmbientRead){
         currentSensorData.primary.temperatures[0]   = ambientData.primary.temperatures[0];
         currentSensorData.primary.humidities[0]     = ambientData.primary.humidities[0];
         currentSensorData.primary.pressures[0]      = ambientData.primary.pressures[0];
@@ -786,29 +677,13 @@ bool performSampling(){
         currentSensorData.secondary.pressures[0]    = ambientData.secondary.pressures[0];
         currentSensorData.secondary.validReadings   = ambientData.secondary.validReadings;
 
-        //dltas
         currentSensorData.delta_temp = ambientData.primary.temperatures[0] - ambientData.secondary.temperatures[0];
         currentSensorData.delta_hum  = ambientData.primary.humidities[0]   - ambientData.secondary.humidities[0];
         currentSensorData.delta_pres = ambientData.primary.pressures[0]    - ambientData.secondary.pressures[0];
     }
-    bool ready = true;
-
-    if(!ready){
-        if(sensors.getLastError() != ERROR_NONE){
-            DEBUG_PRINTLN(F("[ERROR] Sensor read failed during sampling!"));
-            if(currentState == STATE_CALIBRATING){
-                char buf[96];
-                snprintf(buf, sizeof(buf), "calib read fail err=%s prog=%.2f", sensors.getLastErrorString(), sensors.getCalibrationProgress());
-                logger.logCalibDebug(String(buf));
-            }
-            lastError = ERROR_SENSOR_READ;
-        }
-        return false;
-    }
 
     ml.addToWindow(currentSensorData);
 
-    //prediction label
     if(display.getMode() == DISPLAY_MODE_PREDICTION){
         logger.setActiveLabel(LOG_LABEL_PRED);
     }
@@ -816,7 +691,6 @@ bool performSampling(){
         logger.logEntry(currentSensorData, currentPrediction.valid ? &currentPrediction : nullptr);
     }
 
-    //send via BLE
     if(ble.isConnected()){
         ble.sendSensorData(currentSensorData);
     }
@@ -1087,7 +961,7 @@ void handleBLE(){
 
         //apply config here
         if(cfg.startsWith("CALIB")){
-            enterState(STATE_ML_BASELINE_CALIB);
+            enterState(STATE_CALIBRATING);
         }
         else if(cfg.startsWith("LOG:ON")){
             if(!logger.isLogging()) logger.startLogging();
@@ -1159,13 +1033,10 @@ void updateDisplay(){
 
         case DISPLAY_MODE_CALIBRATION:
             if(currentState == STATE_WARMUP){
-                uint32_t remaining= getWarmupRemainingSeconds();
+                uint32_t remaining = getWarmupRemainingSeconds();
                 char msg[32];
-                snprintf(msg,sizeof(msg),"Warming up... %lum %02lus", remaining/60, remaining%60);
+                snprintf(msg, sizeof(msg), "Warming up... %lum %02lus", remaining/60, remaining%60);
                 display.showCalibrationScreen(getWarmupProgress(), msg);
-            }
-            else if(currentState == STATE_ML_BASELINE_CALIB){
-                display.showCalibrationScreen(ml.getBaselineCalibrationProgress(), "Ambient Baseline...");
             }
             else if(sensors.isCalibrating()){
                 display.showCalibrationScreen(sensors.getCalibrationProgress(), "Calibrating...");
@@ -1212,7 +1083,7 @@ void menuActionShowSensorData(){
 }
 
 void menuActionShowPrediction(){
-    if(!isSensorWarmedUp){
+    if(!isSensorWarmedUp()){
         DEBUG_PRINTLN(F("[MENU] Cannot enter prediction mode: Sensor is still warming up."));
         display.setMode(DISPLAY_MODE_CALIBRATION);
         return;
@@ -1237,7 +1108,7 @@ void menuActionShowError(){
 }
 
 void menuActionDataCollection(){
-    if(!isSensorWarmedUp){
+    if(!isSensorWarmedUp()){
         DEBUG_PRINTLN(F("[MENU] Cannot enter data collection mode: Sensor is still warming up."));
         display.setMode(DISPLAY_MODE_CALIBRATION);
         return;
@@ -1248,7 +1119,7 @@ void menuActionDataCollection(){
 
 void menuActionCalibrate(){
     if(currentState != STATE_ERROR){
-        enterState(STATE_ML_BASELINE_CALIB);
+        enterState(STATE_CALIBRATING);
         display.setMode(DISPLAY_MODE_CALIBRATION);
     }
 }

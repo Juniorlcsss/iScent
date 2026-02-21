@@ -4,7 +4,6 @@
 #include <Arduino.h>
 #include "config.h"
 #include "bme688_handler.h"
-#include "baseline_calibration.h"
 
 // Detect Edge Impulse assets without pulling in the full implementation here
 #if !defined(EI_CLASSIFIER)
@@ -124,17 +123,6 @@ public:
     scent_class_t getClassFromName(const char* name) const;
     
     //===========================================================================================================
-    //baseline calibration
-    //===========================================================================================================
-    void startBaselineCalibration(uint16_t sample_count = 10);
-    void updateBaselineCalibration(const dual_sensor_data_t &data);
-    bool isBaselineCalibrationComplete() const;
-    float getBaselineCalibrationProgress() const;
-    void setManualBaseline(const baseline_t& baseline);
-    const baseline_t& getBaseline() const;
-    bool isBaselineValid() const;
-    
-    //===========================================================================================================
     //inference
     //===========================================================================================================
     bool runInference(ml_prediction_t &pred);
@@ -233,9 +221,6 @@ private:
     ml_feature_buffer_t _feature_buffer;
     inference_mode_t _inference_mode;
     temporal_state_t _temporal_state;
-    
-    //baseline calibration
-    BaselineCalibration _baseline_calibration;
 
     //window
     uint16_t _window_index;
@@ -282,7 +267,7 @@ private:
     //===========================================================================================================
     //methods
     //===========================================================================================================
-    void normaliseFeatures(ml_feature_buffer_t& features, const baseline_t& baseline);
+    void normaliseFeatures(ml_feature_buffer_t& features);
     void computeStats(float *data, const float *window, uint16_t size);
     void extractGasFeatures(float *output, const float window[][BME688_NUM_HEATER_STEPS], uint16_t size);
 

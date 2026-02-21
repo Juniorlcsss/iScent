@@ -86,9 +86,12 @@ typedef enum{
 #define HUMIDITY_BASELINE 40.0f
 #define TEMPERATURE_BASELINE 24.0f
 
-//corrections
-#define TEMP_CORRECTION_C (-15.0f)
-#define HUM_CORRECTION_PCT (-6.0f)
+// Temperature / humidity correction policy
+// Keep this false to avoid baseline-driven temp/humidity bias from calibration.
+#define APPLY_TEMP_HUM_CALIBRATION TEMPERATURE_BASELINE
+// Optional static corrections (e.g., from thermometer comparison).
+#define STATIC_TEMP_CORRECTION_C -5.0f
+#define STATIC_HUM_CORRECTION_PCT 0.0f
 
 
 //===========================================================================================================
@@ -217,7 +220,6 @@ typedef enum{
     STATE_WARMUP,
     STATE_IDLE,
     STATE_CALIBRATING,
-    STATE_ML_BASELINE_CALIB,
     STATE_SAMPLING,
     STATE_INFERENCING,
     STATE_ENSEMBLE_INFERENCING,

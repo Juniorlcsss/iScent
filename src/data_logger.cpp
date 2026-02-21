@@ -209,6 +209,11 @@ bool DataLogger::logEntry(const dual_sensor_data_t &data, const ml_prediction_t 
         return false;
     }
 
+    //skip calibration entries entirely
+    if(_active_label == LOG_LABEL_CALIBRATION){
+        return true;
+    }
+
     if(!_log_file){
         DEBUG_PRINTLN(F("[DataLogger] Warning: no open log file; stopping logging."));
         _is_logging = false;
@@ -565,20 +570,19 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
         return sum / (float)count;
     };
 
-    //primary THP
-    _log_file.printf("%.2f,%.2f,%.2f,",
+    //primary THP (no trailing comma — gas loop provides leading commas)
+    _log_file.printf("%.2f,%.2f,%.2f",
     checkMean(entry.sensor_data.primary.temperatures, entry.sensor_data.primary.validReadings),
     checkMean(entry.sensor_data.primary.humidities, entry.sensor_data.primary.validReadings),
     checkMean(entry.sensor_data.primary.pressures, entry.sensor_data.primary.validReadings));
-
 
     //primary all gas steps
     for(int i=0; i<BME688_NUM_HEATER_STEPS; i++){
         _log_file.printf(",%.0f", entry.sensor_data.primary.gas_resistances[i]);
     }
 
-    //secondary THP
-    _log_file.printf("%.2f,%.2f,%.2f,",
+    //secondary THP (leading comma after last gas, no trailing comma)
+    _log_file.printf(",%.2f,%.2f,%.2f",
     checkMean(entry.sensor_data.secondary.temperatures, entry.sensor_data.secondary.validReadings),
     checkMean(entry.sensor_data.secondary.humidities, entry.sensor_data.secondary.validReadings),
     checkMean(entry.sensor_data.secondary.pressures, entry.sensor_data.secondary.validReadings));
@@ -588,8 +592,8 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
         _log_file.printf(",%.0f", entry.sensor_data.secondary.gas_resistances[i]);
     }
 
-    //deltas
-    _log_file.printf("%.2f,%.2f,%.2f,%.0f,",
+    //deltas (leading comma after last gas)
+    _log_file.printf(",%.2f,%.2f,%.2f,%.0f,",
     entry.sensor_data.delta_temp,
     entry.sensor_data.delta_hum,
     entry.sensor_data.delta_pres,

@@ -22,9 +22,7 @@ BME688Handler::BME688Handler():
     _calibration_temp_sum_p(0),
     _last_error(ERROR_NONE),
     _has_saved_profile(false),
-    _scan_active(false),
-    _auto_baseline_set(false),
-    _baseline_wait_count(0)
+    _scan_active(false)
 {
     memset(&_calibration_data, 0 , sizeof(_calibration_data));
     memset(&_primary_stats, 0, sizeof(_primary_stats));
@@ -275,6 +273,7 @@ bool BME688Handler::configureParallelMode(Bme68x &sensor){
         sensor.setHeaterProf(tempBuf, durBuf, BME688_NUM_HEATER_STEPS);
     }
     sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
+    sensor.setOpMode(BME68X_SEQUENTIAL_MODE);
     return sensor.checkStatus()!=BME68X_ERROR;
 }
 
@@ -318,9 +317,6 @@ bool BME688Handler::readParallelScan(dual_sensor_data_t &data){
 
     //
     if(primarySuccess || secondarySuccess){
-        //baseline
-        ensureBaseline(data);
-
         //apply calibration 
         if(_calibration_data.calibrated && !_isCalibrating){
             if(primarySuccess){
@@ -389,8 +385,6 @@ bool BME688Handler::performFullScan(dual_sensor_data_t &data){
     }
 
     if(success){
-        ensureBaseline(data);
-
         //apply calibration 
         if(_calibration_data.calibrated && !_isCalibrating){
             if(data.primary.validReadings > 0){
@@ -439,7 +433,7 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
 
     sensor.setTPH(BME68X_OS_2X, BME68X_OS_16X, BME68X_OS_1X);
 
-    sensor.setOpMode(BME68X_PARALLEL_MODE);
+    sensor.setOpMode(BME68X_SEQUENTIAL_MODE);
 
     //get timeout
     uint32_t heatDur=0;
@@ -450,7 +444,7 @@ bool BME688Handler::readSensorScan(Bme68x &sensor, sensor_scan_t &scan){
         heatDur = (uint32_t)steps * BME688_HEATER_DURATION;
     }
 
-    const uint32_t perStepUs = sensor.getMeasDur(BME68X_PARALLEL_MODE);
+    const uint32_t perStepUs = sensor.getMeasDur(BME68X_SEQUENTIAL_MODE);
     const uint32_t perStepMs = (perStepUs + 999U) / 1000U;
     const uint32_t sweepMs = (perStepMs + 10U) * steps;
     const uint32_t timeout = millis() + heatDur + sweepMs + SCAN_EXTRA_TIMEOUT_MS;
@@ -621,7 +615,7 @@ bool BME688Handler::beginNonBlockingScan(){
             heatDur = (uint32_t)steps * BME688_HEATER_DURATION;
         }
 
-        uint32_t perStepUs = sensor.getMeasDur(BME68X_PARALLEL_MODE);
+        uint32_t perStepUs = sensor.getMeasDur(BME68X_SEQUENTIAL_MODE);
         uint32_t perStepMs=(perStepUs+999U)/1000U;
         uint32_t sweepMs = (perStepMs + 10U) * steps;
 
@@ -631,7 +625,7 @@ bool BME688Handler::beginNonBlockingScan(){
         ctx.timeoutMs=millis()+heatDur+sweepMs+SCAN_EXTRA_TIMEOUT_MS;
         ctx.lastProgressMs = ctx.startMs;
 
-        sensor.setOpMode(BME68X_PARALLEL_MODE);
+        sensor.setOpMode(BME68X_SEQUENTIAL_MODE);
     };
 
     if(_primary_ready){
@@ -747,30 +741,15 @@ bool BME688Handler::startCalibration(uint16_t samples){
     _calibration_samples = samples;
     _calibration_collected = 0;
 
-    //reset vals
     _calibration_temp_sum_p = _calibration_temp_sum_s = 0.0f;
     _calibration_hum_sum_p = _calibration_hum_sum_s = 0.0f;
     _calibration_pres_sum_p = _calibration_pres_sum_s = 0.0f;
-    memset(_calibration_gas_sum_p,0,sizeof(_calibration_gas_sum_p));
-    memset(_calibration_gas_sum_s,0,sizeof(_calibration_gas_sum_s));
+    memset(_calibration_gas_sum_p, 0, sizeof(_calibration_gas_sum_p));
+    memset(_calibration_gas_sum_s, 0, sizeof(_calibration_gas_sum_s));
 
-    //use a shorter heater sweep
-    if(!_has_saved_profile){
-        memcpy(&_saved_profile, &_current_profile, sizeof(_current_profile));
-        _has_saved_profile = true;
-    }
-
-    heater_profile_t fast_profile;
-    uint8_t steps = (_current_profile.steps > 0) ? min<uint8_t>(_current_profile.steps, 5) : 5;
-    for(uint8_t i=0; i<steps; i++){
-        fast_profile.temperatures[i] = _current_profile.temperatures[i] > 0 ? _current_profile.temperatures[i] : DEFAULT_HEATER_TEMPERATURES[i];
-        fast_profile.durations[i] = max<uint16_t>(DEFAULT_HEATER_DURATIONS[i], 80);
-    }
-    fast_profile.steps = steps;
-    fast_profile.profile_name = "CalibFast";
-    setHeaterProfile(fast_profile);
-
-    DEBUG_PRINTLN("[BME688] Calibration started");
+    // Use the current full profile — don't switch to a fast subset
+    DEBUG_PRINTF("[BME688] Calibration started with %d samples, %d heater steps\n", 
+        samples, _current_profile.steps);
     return true;
 }
 
@@ -807,27 +786,39 @@ void BME688Handler::accumulateCalibrationData(const dual_sensor_data_t &data){
         return;
     }
 
-    //primary
-    if(data.primary.complete){
-        for(uint8_t i=0; i<steps; i++){
-            _calibration_temp_sum_p += data.primary.temperatures[i];
-            _calibration_hum_sum_p += data.primary.humidities[i];
-            _calibration_pres_sum_p += data.primary.pressures[i];
-            _calibration_gas_sum_p[i] += data.primary.gas_resistances[i];
+    bool accumulated = false;
+
+    // Primary — accept partial scans
+    if(data.primary.validReadings > 0){
+        for(uint8_t i = 0; i < steps; i++){
+            if(data.primary.gas_resistances[i] > 0.0f){
+                _calibration_temp_sum_p += data.primary.temperatures[i];
+                _calibration_hum_sum_p += data.primary.humidities[i];
+                _calibration_pres_sum_p += data.primary.pressures[i];
+                _calibration_gas_sum_p[i] += data.primary.gas_resistances[i];
+            }
         }
+        accumulated = true;
     }
 
-    //secondary
-    if(data.secondary.complete){
-        for(uint8_t i=0; i<steps; i++){
-            _calibration_temp_sum_s += data.secondary.temperatures[i];
-            _calibration_hum_sum_s += data.secondary.humidities[i];
-            _calibration_pres_sum_s += data.secondary.pressures[i];
-            _calibration_gas_sum_s[i] += data.secondary.gas_resistances[i];
+    // Secondary — accept partial scans
+    if(data.secondary.validReadings > 0){
+        for(uint8_t i = 0; i < steps; i++){
+            if(data.secondary.gas_resistances[i] > 0.0f){
+                _calibration_temp_sum_s += data.secondary.temperatures[i];
+                _calibration_hum_sum_s += data.secondary.humidities[i];
+                _calibration_pres_sum_s += data.secondary.pressures[i];
+                _calibration_gas_sum_s[i] += data.secondary.gas_resistances[i];
+            }
         }
+        accumulated = true;
     }
 
-    _calibration_collected++;
+    if(accumulated){
+        _calibration_collected++;
+        DEBUG_PRINTF("[BME688] Calibration sample %u/%u accumulated\n", 
+            _calibration_collected, _calibration_samples);
+    }
 
     if(_calibration_collected >= _calibration_samples){
         finishCalibration();
@@ -835,7 +826,7 @@ void BME688Handler::accumulateCalibrationData(const dual_sensor_data_t &data){
 }
 
 bool BME688Handler::finishCalibration(){
-    if(!_isCalibrating || _calibration_collected ==0){
+    if(!_isCalibrating || _calibration_collected == 0){
         DEBUG_PRINTLN("[BME688] Not calibrating, cannot finish calibration");
         return false;
     }
@@ -847,9 +838,9 @@ bool BME688Handler::finishCalibration(){
         _isCalibrating = false;
         return false;
     }
+    
     float n = (float)_calibration_collected * steps;
 
-    //calculate offsets
     _calibration_data.temp_offset_primary = (_calibration_temp_sum_p / n) - TEMPERATURE_BASELINE;
     _calibration_data.temp_offset_secondary = (_calibration_temp_sum_s / n) - TEMPERATURE_BASELINE;
     _calibration_data.humidity_offset_primary = (_calibration_hum_sum_p / n) - HUMIDITY_BASELINE;
@@ -857,9 +848,8 @@ bool BME688Handler::finishCalibration(){
     _calibration_data.pressure_offset_primary = 0;
     _calibration_data.pressure_offset_secondary = 0;
 
-    //gas baselines
     float samples = (float)_calibration_collected;
-    for(uint8_t i=0; i<steps; i++){
+    for(uint8_t i = 0; i < steps; i++){
         _calibration_data.gas_baseline_primary[i] = _calibration_gas_sum_p[i] / samples;
         _calibration_data.gas_baseline_secondary[i] = _calibration_gas_sum_s[i] / samples;
     }
@@ -867,21 +857,16 @@ bool BME688Handler::finishCalibration(){
     _calibration_data.calibrated = true;
     _calibration_data.timestamp = millis();
     
-    //
     g_iaq_baseline_primary = _calibration_data.gas_baseline_primary[0];
     g_iaq_baseline_secondary = _calibration_data.gas_baseline_secondary[0];
     if(g_iaq_baseline_primary <= 0.0f && g_iaq_baseline_secondary > 0.0f){
         g_iaq_baseline_primary = g_iaq_baseline_secondary;
     }
+    
     _isCalibrating = false;
     DEBUG_PRINTLN("[BME688] Calibration finished");
     printCalibrationData();
     saveCalibration();
-
-    if(_has_saved_profile){
-        setHeaterProfile(_saved_profile);
-        _has_saved_profile = false;
-    }
     return true;
 }
 
@@ -895,82 +880,18 @@ void BME688Handler::applyCalibration(sensor_scan_t &scan, bool isPrimary){
     float humOffset = isPrimary ? _calibration_data.humidity_offset_primary : _calibration_data.humidity_offset_secondary;
 
     for(uint i=0; i<_current_profile.steps; i++){
-        scan.temperatures[i] -= tempOffset;
-        scan.humidities[i] -= humOffset;
+        if(APPLY_TEMP_HUM_CALIBRATION){
+            scan.temperatures[i] -= tempOffset;
+            scan.humidities[i] -= humOffset;
+        }
 
-        //apply corrections
-        scan.temperatures[i] += TEMP_CORRECTION_C;
-        scan.humidities[i] += HUM_CORRECTION_PCT;
+        scan.temperatures[i] += STATIC_TEMP_CORRECTION_C;
+        scan.humidities[i] += STATIC_HUM_CORRECTION_PCT;
         scan.humidities[i] = CONSTRAIN_FLOAT(scan.humidities[i], 0.0f, 100.0f);
 
         //gas left as ohms
         //NOTE: Use getGasRatio() if a normalized value is required elsewhere.
     }
-}
-
-void BME688Handler::ensureBaseline(const dual_sensor_data_t &data){
-    if(_calibration_data.calibrated || _isCalibrating || _auto_baseline_set){
-        return;
-    }
-
-    const bool primOk = data.primary.validReadings > 0;
-    const bool secOk = data.secondary.validReadings > 0;
-    if(!primOk && !secOk){
-        return;
-    }
-
-    _baseline_wait_count++;
-    if(_baseline_wait_count < 5){
-        return;
-    }
-
-    auto inGasBand = [](float g){ return (g >= 1.0e4f) && (g <= 1.0e6f); };
-
-    //baselines
-    bool anyValid = false;
-    for(uint8_t i=0; i<_current_profile.steps; i++){
-        const float pGas = primOk ? data.primary.gas_resistances[i] : 0.0f;
-        const float sGas = secOk ? data.secondary.gas_resistances[i] : 0.0f;
-
-        const bool pOk = inGasBand(pGas);
-        const bool sOk = inGasBand(sGas);
-
-        float chosen = 0.0f;
-        if(pOk){
-            chosen = pGas;
-        } else if(sOk){
-            chosen = sGas;
-        }
-
-        if(chosen <= 0.0f){
-            continue;
-        }
-
-        _calibration_data.gas_baseline_primary[i] = chosen;
-        _calibration_data.gas_baseline_secondary[i] = chosen;
-        anyValid = true;
-    }
-
-    if(!anyValid){
-        return;
-    }
-
-    _calibration_data.temp_offset_primary = 0.0f;
-    _calibration_data.temp_offset_secondary = 0.0f;
-    _calibration_data.humidity_offset_primary = 0.0f;
-    _calibration_data.humidity_offset_secondary = 0.0f;
-    _calibration_data.pressure_offset_primary = 0.0f;
-    _calibration_data.pressure_offset_secondary = 0.0f;
-
-    _calibration_data.calibrated = true;
-    _calibration_data.timestamp = millis();
-    g_iaq_baseline_primary = _calibration_data.gas_baseline_primary[0];
-    g_iaq_baseline_secondary = _calibration_data.gas_baseline_secondary[0];
-    if(g_iaq_baseline_primary <= 0.0f && g_iaq_baseline_secondary > 0.0f){
-        g_iaq_baseline_primary = g_iaq_baseline_secondary;
-    }
-    _auto_baseline_set = true;
-    DEBUG_PRINTLN("[BME688] Auto baseline set from first valid scan");
 }
 
 sensor_calibration_t BME688Handler::getCalibrationData() const {

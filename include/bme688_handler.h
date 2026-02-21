@@ -142,10 +142,7 @@ public:
     sensor_calibration_t getCalibrationData() const;
     void setCalibrationData(const sensor_calibration_t &calib);
     void applyCalibration(sensor_scan_t &scan, bool isPrimary);
-    void ensureBaseline(const dual_sensor_data_t &data);
     void clearCalibration();
-
-    uint16_t _baseline_wait_count;
 
     //save/load
     bool saveCalibration();
@@ -235,9 +232,6 @@ private:
     bool _secondary_ready;
     bool _isCalibrating;
     bool _isSleeping;
-
-    bool _auto_baseline_set;
-
 
     uint32_t _sample_count;
     uint16_t _calibration_samples;
