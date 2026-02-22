@@ -22,7 +22,10 @@ BME688Handler::BME688Handler():
     _calibration_temp_sum_p(0),
     _last_error(ERROR_NONE),
     _has_saved_profile(false),
-    _scan_active(false)
+    _scan_active(false),
+    _runtime_temp_baseline(TEMPERATURE_BASELINE),
+    _runtime_hum_baseline(HUMIDITY_BASELINE),
+    _runtime_baselines_set(false)
 {
     memset(&_calibration_data, 0 , sizeof(_calibration_data));
     memset(&_primary_stats, 0, sizeof(_primary_stats));
@@ -841,17 +844,17 @@ bool BME688Handler::finishCalibration(){
     
     float n = (float)_calibration_collected * steps;
 
-    _calibration_data.temp_offset_primary = (_calibration_temp_sum_p / n) - TEMPERATURE_BASELINE;
-    _calibration_data.temp_offset_secondary = (_calibration_temp_sum_s / n) - TEMPERATURE_BASELINE;
-    _calibration_data.humidity_offset_primary = (_calibration_hum_sum_p / n) - HUMIDITY_BASELINE;
-    _calibration_data.humidity_offset_secondary = (_calibration_hum_sum_s / n) - HUMIDITY_BASELINE;
-    _calibration_data.pressure_offset_primary = 0;
-    _calibration_data.pressure_offset_secondary = 0;
+    _calibration_data.temp_offset_primary =(_calibration_temp_sum_p / n)-_runtime_temp_baseline;
+    _calibration_data.temp_offset_secondary =(_calibration_temp_sum_s / n)-_runtime_temp_baseline;
+    _calibration_data.humidity_offset_primary=(_calibration_hum_sum_p / n)-_runtime_hum_baseline;
+    _calibration_data.humidity_offset_secondary=(_calibration_hum_sum_s / n)-_runtime_hum_baseline;
+    _calibration_data.pressure_offset_primary=0;
+    _calibration_data.pressure_offset_secondary=0;
 
     float samples = (float)_calibration_collected;
-    for(uint8_t i = 0; i < steps; i++){
-        _calibration_data.gas_baseline_primary[i] = _calibration_gas_sum_p[i] / samples;
-        _calibration_data.gas_baseline_secondary[i] = _calibration_gas_sum_s[i] / samples;
+    for(uint8_t i=0; i < steps;i++){
+        _calibration_data.gas_baseline_primary[i]=_calibration_gas_sum_p[i]/samples;
+        _calibration_data.gas_baseline_secondary[i]=_calibration_gas_sum_s[i]/samples;
     }
 
     _calibration_data.calibrated = true;
@@ -870,6 +873,12 @@ bool BME688Handler::finishCalibration(){
     return true;
 }
 
+void BME688Handler::setRuntimeBaselines(float temp, float hum){
+    _runtime_temp_baseline = temp;
+    _runtime_hum_baseline = hum;
+    _runtime_baselines_set = true;
+    DEBUG_PRINTF("[BME688] Runtime baselines set: temp=%.2f hum=%.2f\n", temp, hum);
+}
 void BME688Handler::applyCalibration(sensor_scan_t &scan, bool isPrimary){
     if(!_calibration_data.calibrated){
         DEBUG_PRINTLN("[BME688] No calibration data to apply");
@@ -888,9 +897,6 @@ void BME688Handler::applyCalibration(sensor_scan_t &scan, bool isPrimary){
         scan.temperatures[i] += STATIC_TEMP_CORRECTION_C;
         scan.humidities[i] += STATIC_HUM_CORRECTION_PCT;
         scan.humidities[i] = CONSTRAIN_FLOAT(scan.humidities[i], 0.0f, 100.0f);
-
-        //gas left as ohms
-        //NOTE: Use getGasRatio() if a normalized value is required elsewhere.
     }
 }
 
@@ -911,20 +917,14 @@ void BME688Handler::clearCalibration(){
 }
 
 bool BME688Handler::saveCalibration(){
-    if(!LittleFS.begin()){
-        DEBUG_PRINTLN("[BME688] LittleFS mount failed, cannot save calibration");
-        return false;
-    }
     File file = LittleFS.open(CALIBRATION_FILE, "w");
     if(!file){
         DEBUG_PRINTLN("[BME688] Cannot open calibration file for writing");
-        LittleFS.end();
         return false;
     }
 
     size_t written = file.write((uint8_t*)&_calibration_data, sizeof(_calibration_data));
     file.close();
-    LittleFS.end();
     if(written != sizeof(_calibration_data)){
         DEBUG_PRINTLN("[BME688] Calibration data write failed");
         return false;
@@ -934,21 +934,14 @@ bool BME688Handler::saveCalibration(){
 }
 
 bool BME688Handler::loadCalibration(){
-    if(!LittleFS.begin()){
-        DEBUG_PRINTLN("[BME688] LittleFS mount failed, cannot load calibration");
-        return false;
-    }
-
     if(!LittleFS.exists(CALIBRATION_FILE)){
         DEBUG_PRINTLN("[BME688] Calibration file does not exist");
-        LittleFS.end();
         return false;
     }
 
     File f = LittleFS.open(CALIBRATION_FILE, "r");
     if(!f){
         DEBUG_PRINTLN("[BME688] Cannot open calibration file for reading");
-        LittleFS.end();
         return false;
     }
 
@@ -969,11 +962,9 @@ bool BME688Handler::loadCalibration(){
     if(invalid || zeroBaseline){
         DEBUG_PRINTLN("[BME688] Calibration data invalid or zero; clearing");
         clearCalibration();
-        LittleFS.end();
         return false;
     }
 
-    LittleFS.end();
     g_iaq_baseline_primary = _calibration_data.gas_baseline_primary[0];
     g_iaq_baseline_secondary = _calibration_data.gas_baseline_secondary[0];
     if(g_iaq_baseline_primary <= 0.0f && g_iaq_baseline_secondary > 0.0f){

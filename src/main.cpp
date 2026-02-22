@@ -7,6 +7,7 @@
 #include "data_logger.h"
 #include "button_handler.h"
 #include "ble_handler.h"
+#include <LittleFS.h>
 
 //===========================================================================================================
 //global vars
@@ -198,11 +199,13 @@ void setup(){
 void ensureLoggingActive(){
     if(loggingActive) return;
     if(currentState == STATE_WARMUP) return;
+    if(collectingLabeled) return;
 
     uint32_t now = millis();
     if(now - lastLoggingRetryMs < LOGGING_RETRY_INTERVAL_MS) return;
     lastLoggingRetryMs = now;
 
+    logger.setActiveLabel(LOG_LABEL_AMBIENT);
     if(logger.startLogging()){
         loggingActive = true;
         DEBUG_PRINTLN(F("[AutoLog] Logging active"));
@@ -273,6 +276,14 @@ void initialiseSystem(){
     buttons.begin();
     //buttons.setCallback(buttonCallback);
 
+
+    //mount lfs once
+    DEBUG_PRINTLN(F("[INIT] Mounting LittleFS..."));
+    if(!LittleFS.begin()){
+        DEBUG_PRINTLN(F("[ERROR] LittleFS mount failed!"));
+    } else {
+        DEBUG_PRINTLN(F("[INIT] LittleFS mounted."));
+    }
 
     //init sensors
     DEBUG_PRINTLN(F("[INIT] Initializing Sensors..."));
@@ -422,15 +433,10 @@ void handleStateMachine(){
                         prog, (unsigned long)(now - lastCalibProgressMs));
                     logger.logCalibDebug(String(buf));
                     sensors.finishCalibration();
-                    logger.flushCalibDebug();
-                    enterState(STATE_IDLE);
                 }
-
-                if(calibStartTime > 0 && (now - calibStartTime) > CALIB_MAX_DURATION_MS){
+                else if(calibStartTime > 0 && (now - calibStartTime) > CALIB_MAX_DURATION_MS){
                     logger.logCalibDebug("CALIB_TIMEOUT_SAVE");
                     sensors.finishCalibration();
-                    logger.flushCalibDebug();
-                    enterState(STATE_IDLE);
                 }
             }
 
@@ -546,7 +552,9 @@ void enterState(system_state_t newState){
     //exit acts
     switch(currentState){
         case STATE_CALIBRATING:
-            sensors.finishCalibration();
+            if(sensors.isCalibrating()){
+                sensors.finishCalibration();
+            }
             calibStartTime = 0;
             break;
 
@@ -680,11 +688,20 @@ bool performSampling(){
         currentSensorData.delta_temp = ambientData.primary.temperatures[0] - ambientData.secondary.temperatures[0];
         currentSensorData.delta_hum  = ambientData.primary.humidities[0]   - ambientData.secondary.humidities[0];
         currentSensorData.delta_pres = ambientData.primary.pressures[0]    - ambientData.secondary.pressures[0];
+
+        //capture runtime baselines
+        if(!sensors.hasRuntimeBaselines()){
+            float t=ambientData.primary.temperatures[0];
+            float h=ambientData.primary.humidities[0];
+            if(t>-40.0f && t <85.0f&& h >= 0.0f&&h<= 100.0f){
+                sensors.setRuntimeBaselines(t,h);
+            }
+        }
     }
 
     ml.addToWindow(currentSensorData);
 
-    if(display.getMode() == DISPLAY_MODE_PREDICTION){
+    if(display.getMode()==DISPLAY_MODE_PREDICTION&&!collectingLabeled){
         logger.setActiveLabel(LOG_LABEL_PRED);
     }
     if(loggingActive){
@@ -1258,22 +1275,25 @@ void dataCollectActionCycleLabel(){
 
 void dataCollectActionToggle(){
     if(collectingLabeled){
-        logger.setActiveLabel(-1);
-        if(logger.isLogging()){
-            logger.stopLogging();
-        }
-        loggingActive = false;
+        //stop collecting
+        logger.flush();
+        logger.setActiveLabel(LOG_LABEL_AMBIENT);
         collectingLabeled = false;
     } 
     else {
-        if(currentLabelSelection < SCENT_CLASS_PURE_CAMOMILE || currentLabelSelection >= SCENT_CLASS_COUNT){
+        //start collecting
+        if(currentLabelSelection< SCENT_CLASS_PURE_CAMOMILE||currentLabelSelection >= SCENT_CLASS_COUNT){
             currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
         }
-        logger.setActiveLabel(currentLabelSelection);
+
+        //make sure logging is active
         if(!logger.isLogging()){
+            logger.setActiveLabel(LOG_LABEL_AMBIENT);
             logger.startLogging();
+            loggingActive =true;
         }
-        loggingActive = true;
+        logger.flush();
+        logger.setActiveLabel(currentLabelSelection);
         collectingLabeled = true;
     }
     refreshDataCollectionMenu();

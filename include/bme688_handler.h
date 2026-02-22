@@ -171,6 +171,12 @@ public:
     static float compensateHumidity(float gas, float hum, float baseline = HUMIDITY_BASELINE);
     static bool detectAnomaly(float current, float base, float thresh=ML_ANOMALY_THRESHOLD);
 
+    //runtime baselines
+    void setRuntimeBaselines(float temp, float hum);
+    float getRuntimeTempBaseline() const { return _runtime_temp_baseline; }
+    float getRuntimeHumBaseline() const { return _runtime_hum_baseline; }
+    bool hasRuntimeBaselines() const { return _runtime_baselines_set; }
+
     //===========================================================================================================
     //statistics
     //===========================================================================================================
@@ -232,6 +238,11 @@ private:
     bool _secondary_ready;
     bool _isCalibrating;
     bool _isSleeping;
+
+    //runtime baselines
+    float _runtime_temp_baseline;
+    float _runtime_hum_baseline;
+    bool _runtime_baselines_set;
 
     uint32_t _sample_count;
     uint16_t _calibration_samples;

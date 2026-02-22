@@ -83,13 +83,10 @@ typedef enum{
 //gas thresholds
 #define GAS_RESISTANCE_MIN 1000.0f //ohms
 #define GAS_RESISTANCE_MAX 1000000.0f //ohms
-#define HUMIDITY_BASELINE 40.0f
-#define TEMPERATURE_BASELINE 24.0f
+#define HUMIDITY_BASELINE 40.0f     //fallback default
+#define TEMPERATURE_BASELINE 24.0f  //fallback default
 
-// Temperature / humidity correction policy
-// Keep this false to avoid baseline-driven temp/humidity bias from calibration.
-#define APPLY_TEMP_HUM_CALIBRATION TEMPERATURE_BASELINE
-// Optional static corrections (e.g., from thermometer comparison).
+#define APPLY_TEMP_HUM_CALIBRATION false
 #define STATIC_TEMP_CORRECTION_C -5.0f
 #define STATIC_HUM_CORRECTION_PCT 0.0f
 

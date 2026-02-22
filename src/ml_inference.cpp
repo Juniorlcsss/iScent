@@ -604,15 +604,9 @@ bool MLInference::exportTrainingData(const char* file){
         return false;
     }
 
-    if(!LittleFS.begin()){
-        DEBUG_PRINTLN(F("[MLInference] LittleFS mount failed"));
-        return false;
-    }
-
     File f = LittleFS.open(file, "w");
     if(!f){
         DEBUG_PRINTLN(F("[MLInference] Failed to open training data file for writing"));
-        LittleFS.end();
         return false;
     }
 
@@ -632,7 +626,6 @@ bool MLInference::exportTrainingData(const char* file){
         f.println();
     }
     f.close();
-    LittleFS.end();
     DEBUG_VERBOSE_PRINTF("[MLInference] Exported %d training samples to %s\n", _training_sample_count, file);
     return true;
 }
