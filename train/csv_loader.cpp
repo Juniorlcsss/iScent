@@ -19,7 +19,6 @@ struct Baseline{
     float gas2_steps[10];
 };
 
-static const int NUM_HEATER_STEPS = 10;
 static const int RAW_COLS_PER_SENSOR = 3 + NUM_HEATER_STEPS;
 static const int TOTAL_RAW_COLS = 2 * RAW_COLS_PER_SENSOR;
 struct RawSensorData{
@@ -105,41 +104,159 @@ static float localSlope(const float* data,int n){
     return (fabsf(denom) < 1e-6f) ? 0.0f : (n * sumXY - sumX * sumY) / denom;
 }
 
+static float trapezoidalAUC(const float* data, int n){
+    float area=0.0f;
+    for(int i=1; i<n; i++){
+        area+=0.5f*(data[i]+data[i-1]);
+    }
+    return area;
+}
 
-static void applyMultiStepTransform(csv_training_sample_t& sample, const RawSensorData& raw, const Baseline& b){
-    uint16_t idx=0;
+static int peakIndex(const float* data,int n){
+    int idx=0;
+    float peak=data[0];
+    for(int i=1; i<n;i++){
+        if(data[i]>peak){
+            peak=data[i];
+            idx=i;
+        }
+    }
+    return idx;
+}
+
+static void applyMultiStepTransform(csv_training_sample_t& sample,const RawSensorData& raw,const Baseline& b) {
+    uint16_t idx = 0;
     float gas1_resp[NUM_HEATER_STEPS];
     float gas2_resp[NUM_HEATER_STEPS];
-
-    for(int i=0; i<NUM_HEATER_STEPS;i++){
-        gas1_resp[i]=raw.gas1[i]/b.gas1_steps[i];
-        gas2_resp[i]=raw.gas2[i]/b.gas2_steps[i];
-        sample.features[idx++]= gas1_resp[i];
+    
+    //get baseline-normalised responses
+    for(int i = 0; i < NUM_HEATER_STEPS; i++){
+        gas1_resp[i] = raw.gas1[i] / b.gas1_steps[i];
+        gas2_resp[i] = raw.gas2[i] / b.gas2_steps[i];
     }
-    for(int i=0; i<NUM_HEATER_STEPS;i++){
-        sample.features[idx++]= gas2_resp[i];
+    
+
+    //0-9
+    float g1_base = (fabsf(gas1_resp[0]) > 1e-6f) ? gas1_resp[0] : 1.0f;
+    float g2_base = (fabsf(gas2_resp[0]) > 1e-6f) ? gas2_resp[0] : 1.0f;
+    
+    float gas1_norm[NUM_HEATER_STEPS];
+    float gas2_norm[NUM_HEATER_STEPS];
+    
+    for(int i = 0; i < NUM_HEATER_STEPS; i++){
+        gas1_norm[i] = gas1_resp[i] / g1_base;
+        gas2_norm[i] = gas2_resp[i] / g2_base;
+        sample.features[idx++] = gas1_norm[i];
     }
-
-    //per step cross sensor
-    for(int i=0; i<NUM_HEATER_STEPS;i++){
-        sample.features[idx++] = (gas2_resp[i] > 0.01f) ? gas1_resp[i] / gas2_resp[i] : 1.0f;
+    
+    //10-19
+    for(int i = 0; i < NUM_HEATER_STEPS; i++){
+        sample.features[idx++] = gas2_norm[i];
     }
+    
 
-    //profile slopes
-    sample.features[idx++]= localSlope(gas1_resp, NUM_HEATER_STEPS);
-    sample.features[idx++]= localSlope(gas2_resp, NUM_HEATER_STEPS);
+    //20-29
+    for(int i = 0; i < NUM_HEATER_STEPS; i++){
+        sample.features[idx++] = (gas2_resp[i] > 0.01f)?gas1_resp[i] / gas2_resp[i] : 1.0f;
+    }
+    
+    //30-39
+    for(int i = 0; i < NUM_HEATER_STEPS; i++){
+        sample.features[idx++] = gas1_resp[i] - gas2_resp[i];
+    }
+    
+    //40-48
+    for(int i = 0; i < NUM_HEATER_STEPS - 1; i++){
+        sample.features[idx++] = gas1_norm[i + 1] - gas1_norm[i];
+    }
+    
+    //49-57
+    for(int i = 0; i < NUM_HEATER_STEPS - 1; i++){
+        sample.features[idx++] = gas2_norm[i + 1] - gas2_norm[i];
+    }
+    
 
-    //profile curvature
+    //58-67
+    sample.features[idx++]=localSlope(gas1_norm, NUM_HEATER_STEPS);
+    sample.features[idx++]=localSlope(gas2_norm, NUM_HEATER_STEPS);
+    
     int half = NUM_HEATER_STEPS / 2;
-    sample.features[idx++] = localSlope(gas1_resp + half, NUM_HEATER_STEPS - half)- localSlope(gas1_resp, half);
-    sample.features[idx++] = localSlope(gas2_resp + half, NUM_HEATER_STEPS - half)- localSlope(gas2_resp, half);
-    //Environment differentials
-    sample.features[idx++] = fabsf(raw.temp1 - raw.temp2);
-    sample.features[idx++] = fabsf(raw.hum1  - raw.hum2);
-    sample.features[idx++] = fabsf(raw.pres1 - raw.pres2);
+    sample.features[idx++] =localSlope(gas1_norm+half, NUM_HEATER_STEPS-half)- localSlope(gas1_norm, half);
+    sample.features[idx++] =localSlope(gas2_norm+half, NUM_HEATER_STEPS-half)- localSlope(gas2_norm, half);
+    
+    sample.features[idx++] = trapezoidalAUC(gas1_norm, NUM_HEATER_STEPS);
+    sample.features[idx++] = trapezoidalAUC(gas2_norm, NUM_HEATER_STEPS);
+    
+    sample.features[idx++] = (float)peakIndex(gas1_norm, NUM_HEATER_STEPS)/ (NUM_HEATER_STEPS - 1);
+    sample.features[idx++] = (float)peakIndex(gas2_norm, NUM_HEATER_STEPS)/ (NUM_HEATER_STEPS - 1);
+    
+    float g1_min = gas1_norm[0], g1_max = gas1_norm[0];
+    float g2_min = gas2_norm[0], g2_max = gas2_norm[0];
+    for(int i = 1; i < NUM_HEATER_STEPS; i++){
+        if(gas1_norm[i] < g1_min){
+            g1_min = gas1_norm[i];
+        }
 
-    if(idx != CSV_FEATURE_COUNT){
-        std::cerr << "Feature count mismatch: expected " << CSV_FEATURE_COUNT << " but got " << idx << std::endl;
+        if(gas1_norm[i] > g1_max){
+            g1_max = gas1_norm[i];
+        }
+
+        if(gas2_norm[i] < g2_min){
+            g2_min = gas2_norm[i];
+        }
+
+        if(gas2_norm[i] > g2_max){
+            g2_max = gas2_norm[i];
+        }
+    }
+    sample.features[idx++]=g1_max - g1_min;
+    sample.features[idx++]=g2_max - g2_min;
+
+    //68-69
+    float g1_early = 0,g1_late = 0,g2_early = 0, g2_late = 0;
+    for(int i = 0; i < 3; i++){
+        g1_early += gas1_norm[i];
+        g2_early += gas2_norm[i];
+        g1_late += gas1_norm[NUM_HEATER_STEPS - 3 + i];
+        g2_late += gas2_norm[NUM_HEATER_STEPS - 3 + i];
+    }
+
+    g1_early /= 3.0f; g1_late /= 3.0f;
+    g2_early /= 3.0f; g2_late /= 3.0f;
+    sample.features[idx++] = (fabsf(g1_early) > 1e-6f)? g1_late / g1_early : 1.0f; 
+    sample.features[idx++] = (fabsf(g2_early) > 1e-6f)? g2_late / g2_early : 1.0f;
+    
+    
+    //70-72
+    float cr_vals[NUM_HEATER_STEPS];
+    float cr_sum = 0;
+    for(int i=0;i<NUM_HEATER_STEPS;i++){
+        cr_vals[i]=(gas2_resp[i] > 0.01f) ? gas1_resp[i] / gas2_resp[i] : 1.0f;
+        cr_sum+=cr_vals[i];
+    }
+    sample.features[idx++] = cr_sum / NUM_HEATER_STEPS; //mean cross-ratio
+    sample.features[idx++] = localSlope(cr_vals, NUM_HEATER_STEPS); //cross-ratio trend
+    
+    //cross-ratio variance
+    float cr_mean = cr_sum / NUM_HEATER_STEPS;
+    float cr_var = 0;
+    for(int i= 0;i<NUM_HEATER_STEPS;i++){
+        float d = cr_vals[i]-cr_mean;
+        cr_var += d*d;
+    }
+    sample.features[idx++] = cr_var/NUM_HEATER_STEPS; //cross-ratio variance
+    
+
+
+    //env
+#if USE_ENV_FEATURES
+    sample.features[idx++] = fabsf(raw.temp1 - raw.temp2);
+    sample.features[idx++] = fabsf(raw.hum1 - raw.hum2);
+    sample.features[idx++] = fabsf(raw.pres1 - raw.pres2);
+#endif
+    
+    if (idx != CSV_FEATURE_COUNT) {
+        std::cerr << "Feature count mismatch: expected " << CSV_FEATURE_COUNT  << " but got " << idx << std::endl;
     }
 }
 
@@ -178,6 +295,25 @@ const char* CSVLoader::getClassName(scent_class_t classId) {
 
 scent_class_t CSVLoader::getClassFromName(const std::string &name){
     std::string lower = toLower(trim(name));
+
+    //strip suffix
+    {
+        size_t p = lower.rfind("pos");
+        if(p != std::string::npos && p > 0){
+            bool allDigits = true;
+            for(size_t i = p + 3; i < lower.size(); i++){
+                if(!isdigit((unsigned char)lower[i])){ allDigits = false; break; }
+            }
+            if(allDigits && (p + 3) < lower.size()){
+                lower = lower.substr(0, p);
+                //trim trailing whitespace
+                while(!lower.empty() && (lower.back() == ' ' || lower.back() == '_')){
+                    lower.pop_back();
+                }
+            }
+        }
+    }
+
     std::replace(lower.begin(), lower.end(), ' ', '_');
 
     //remove parentheses
@@ -198,46 +334,22 @@ scent_class_t CSVLoader::getClassFromName(const std::string &name){
         }
     }
 
-    //keyword
-    if (lower.find("camomile") != std::string::npos || 
-        lower.find("chamomile") != std::string::npos) {
-        return SCENT_CLASS_PURE_CAMOMILE;
+    //keyword matching (order matters: check combined terms first)
+    bool hasDecaf = (lower.find("decaf") != std::string::npos);
+    bool hasTea = (lower.find("tea") != std::string::npos);
+    bool hasCoffee = (lower.find("coffee") != std::string::npos);
+
+    if (hasDecaf && hasTea) {
+        return SCENT_CLASS_DECAF_TEA;
     }
-    if (lower.find("mint") != std::string::npos) {
-        return SCENT_CLASS_THOROUGHLY_MINTED_INFUSION;
+    if (hasDecaf && hasCoffee) {
+        return SCENT_CLASS_DECAF_COFFEE;
     }
-    if (lower.find("berry") != std::string::npos) {
-        return SCENT_CLASS_BERRY_BURST;
+    if (hasTea && !hasDecaf) {
+        return SCENT_CLASS_TEA;
     }
-    if (lower.find("darjeeling") != std::string::npos) {
-        return SCENT_CLASS_DARJEELING_BLEND;
-    }
-    if (lower.find("nutmeg") != std::string::npos || 
-        lower.find("vanilla") != std::string::npos ||
-        lower.find("decaf") != std::string::npos) {
-        return SCENT_CLASS_DECAF_NUTMEG_VANILLA;
-    }
-    if (lower.find("earl") != std::string::npos) {
-        return SCENT_CLASS_EARL_GREY;
-    }
-    if (lower.find("breakfast") != std::string::npos) {
-        return SCENT_CLASS_ENGLISH_BREAKFAST_TEA;
-    }
-    if (lower.find("orange") != std::string::npos) {
-        return SCENT_CLASS_FRESH_ORANGE;
-    }
-    if (lower.find("lemon") != std::string::npos || 
-        lower.find("garden") != std::string::npos) {
-        return SCENT_CLASS_GARDEN_SELECTION_LEMON;
-    }
-    if (lower.find("green") != std::string::npos) {
-        return SCENT_CLASS_GREEN_TEA;
-    }
-    if (lower.find("raspberry") != std::string::npos) {
-        return SCENT_CLASS_RASPBERRY;
-    }
-    if (lower.find("cherry") != std::string::npos) {
-        return SCENT_CLASS_SWEET_CHERRY;
+    if (hasCoffee && !hasDecaf) {
+        return SCENT_CLASS_COFFEE;
     }
     
     return SCENT_CLASS_UNKNOWN;
@@ -499,4 +611,41 @@ void CSVLoader::printInfo() const {
         << pair.second << " (" << std::fixed << std::setprecision(1)  << pct << "%)" << std::endl;
     }
     std::cout << "==================================" << std::endl;
+}
+
+void CSVLoader::printFeatureNames(){
+        std::cout << "\nFeatures: " << CSV_FEATURE_COUNT << std::endl;
+    int idx = 0;
+    for (int i = 0; i < 10; i++)
+        std::cout << "  [" << idx++ << "] gas1_norm_step" <<i << std::endl;
+    for (int i = 0; i < 10; i++)
+        std::cout << "  [" << idx++ << "] gas2_norm_step" <<i << std::endl;
+    for (int i = 0; i < 10; i++)
+        std::cout << "  [" << idx++ << "] cross_ratio_step"<< i << std::endl;
+    for (int i = 0; i < 10; i++)
+        std::cout << "  [" << idx++ << "] diff_step" <<i << std::endl;
+    for (int i = 0; i < 9; i++)
+        std::cout << "  [" << idx++ << "] gas1_delta_step" <<i << std::endl;
+    for (int i = 0; i < 9; i++)
+        std::cout << "  [" << idx++ << "] gas2_delta_step" <<i << std::endl;
+    std::cout <<"  [" << idx++ << "] slope1_norm"<<std::endl;
+    std::cout << "  [" << idx++ << "] slope2_norm" << std::endl;
+    std::cout << "  [" << idx++ << "] curvature1_norm" << std::endl;
+    std::cout << "  [" << idx++ << "] curvature2_norm" << std::endl;
+    std::cout << "  [" << idx++ << "] auc1_norm" << std::endl;
+    std::cout << "  [" << idx++ << "] auc2_norm" << std::endl;
+    std::cout << "  [" << idx++ << "] peak_idx1" << std::endl;
+    std::cout << "  [" << idx++ << "] peak_idx2" << std::endl;
+    std::cout << "  [" << idx++ << "] range1" << std::endl;
+    std::cout << "  [" << idx++ << "] range2" << std::endl;
+    std::cout << "  [" << idx++ << "] late_early_ratio1" << std::endl;
+    std::cout << "  [" << idx++ << "] late_early_ratio2" << std::endl;
+    std::cout << "  [" << idx++ << "] cross_ratio_mean" << std::endl;
+    std::cout << "  [" << idx++ << "] cross_ratio_slope" << std::endl;
+    std::cout << "  [" << idx++ << "] cross_ratio_var" << std::endl;
+#if USE_ENV_FEATURES
+    std::cout << "  [" << idx++ << "] delta_temp" << std::endl;
+    std::cout << "  [" << idx++ << "] delta_hum" << std::endl;
+    std::cout << "  [" << idx++ << "] delta_pres" << std::endl;
+#endif
 }

@@ -6,38 +6,30 @@
 #include <vector>
 #include <map>
 
-#define CSV_FEATURE_COUNT 37
+
+#define NUM_HEATER_STEPS 10
+#define USE_ENV_FEATURES false
+#if USE_ENV_FEATURES
+    #define CSV_FEATURE_COUNT 76
+#else
+    #define CSV_FEATURE_COUNT 73
+#endif
 
 //scent classes
 typedef enum {
-    SCENT_CLASS_PURE_CAMOMILE = 0,
-    SCENT_CLASS_THOROUGHLY_MINTED_INFUSION,
-    SCENT_CLASS_BERRY_BURST,
-    SCENT_CLASS_DARJEELING_BLEND,
-    SCENT_CLASS_DECAF_NUTMEG_VANILLA,
-    SCENT_CLASS_EARL_GREY,
-    SCENT_CLASS_ENGLISH_BREAKFAST_TEA,
-    SCENT_CLASS_FRESH_ORANGE,
-    SCENT_CLASS_GARDEN_SELECTION_LEMON,
-    SCENT_CLASS_GREEN_TEA,
-    SCENT_CLASS_RASPBERRY,
-    SCENT_CLASS_SWEET_CHERRY,
+    SCENT_CLASS_DECAF_TEA = 0,
+    SCENT_CLASS_DECAF_COFFEE,
+    SCENT_CLASS_TEA,
+    SCENT_CLASS_COFFEE,
     SCENT_CLASS_COUNT,
     SCENT_CLASS_UNKNOWN = 255
 } scent_class_t;
+
 static const char* CSV_SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
-    "camomile",
-    "thoroughly_minted_infusion",
-    "berry_burst",
-    "darjeeling_blend",
-    "decaf_nutmeg_vanilla",
-    "earl_grey",
-    "english_breakfast_tea",
-    "fresh_orange",
-    "garden_selection_lemon",
-    "green_tea",
-    "raspberry",
-    "sweet_cherry"
+    "decaf_tea",
+    "decaf_coffee",
+    "tea",
+    "coffee"
 };
 
 //training sample
@@ -71,6 +63,7 @@ public:
     csv_training_sample_t* getSamples() const { return _samples; }
 
     void printInfo() const;
+    static void printFeatureNames();
 
     static const char* getClassName(scent_class_t id);
     static scent_class_t getClassFromName(const std::string& name);

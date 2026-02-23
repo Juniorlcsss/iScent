@@ -221,6 +221,49 @@ scent_class_t MLInference::getClassFromName(const char* name) const{
     char target[64];
     normalizeSimple(name, target, sizeof(target));
 
+    //strip positional suffix
+    {
+        size_t tlen = strlen(target);
+        //scan backwards for pos
+        for(size_t p = 0; p + 3 < tlen; p++){
+            if(target[p] == 'p' && target[p+1] == 'o' && target[p+2] == 's'){
+                bool allDigits = true;
+                bool hasDigits = (p + 3 < tlen);
+                for(size_t d = p + 3; d < tlen; d++){
+                    if(!isdigit((unsigned char)target[d])){ allDigits = false; break; }
+                }
+                if(allDigits && hasDigits){
+                    //trim back to before pos
+                    size_t cut = p;
+                    while(cut > 0 && (target[cut-1] == ' ' || target[cut-1] == '_')){
+                        cut--;
+                    }
+                    target[cut] = '\0';
+                    break;
+                }
+            }
+        }
+    }
+
+    {
+        bool hasDecaf = (strstr(target, "decaf") != nullptr);
+        bool hasTea = (strstr(target, "tea") != nullptr);
+        bool hasCoffee = (strstr(target, "coffee") != nullptr);
+        
+        if (hasDecaf && hasTea) {
+            return SCENT_CLASS_DECAF_TEA;
+        }
+        if (hasDecaf && hasCoffee) {
+            return SCENT_CLASS_DECAF_COFFEE;
+        }
+        if (hasTea && !hasDecaf) {
+            return SCENT_CLASS_TEA;
+        }
+        if (hasCoffee && !hasDecaf) {
+            return SCENT_CLASS_COFFEE;
+        }
+    }
+
     for(int i = 0; i < SCENT_CLASS_COUNT; i++){
         char candidate[64];
         normalizeSimple(SCENT_CLASS_NAMES[i], candidate, sizeof(candidate));

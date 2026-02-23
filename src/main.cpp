@@ -42,7 +42,7 @@ inference_mode_t currentInferenceMode = INFERENCE_MODE_SINGLE;
 bool loggingActive = false;
 bool continuousInference = true;
 bool collectingLabeled = false;
-int16_t currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
+int16_t currentLabelSelection = SCENT_CLASS_DECAF_TEA;
 uint32_t lastLoggingRetryMs = 0;
 const uint32_t LOGGING_RETRY_INTERVAL_MS = 3000;
 uint8_t predictionSelection = 0;
@@ -1255,8 +1255,8 @@ void settingsActionBackToMain(){
 //===========================================================================================================
 
 void refreshDataCollectionMenu(){
-    if(currentLabelSelection < SCENT_CLASS_PURE_CAMOMILE || currentLabelSelection >= SCENT_CLASS_COUNT){
-        currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
+    if(currentLabelSelection<SCENT_CLASS_DECAF_TEA || currentLabelSelection>=SCENT_CLASS_COUNT){
+        currentLabelSelection = SCENT_CLASS_DECAF_TEA;
     }
 
     const char* labelName = (currentLabelSelection >=0 && currentLabelSelection < SCENT_CLASS_COUNT) ? SCENT_CLASS_NAMES[currentLabelSelection] : "Unknown";
@@ -1268,7 +1268,7 @@ void refreshDataCollectionMenu(){
 void dataCollectActionCycleLabel(){
     currentLabelSelection++;
     if(currentLabelSelection >= SCENT_CLASS_COUNT || currentLabelSelection == SCENT_CLASS_UNKNOWN){
-        currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
+        currentLabelSelection=SCENT_CLASS_DECAF_TEA;
     }
     refreshDataCollectionMenu();
 }
@@ -1282,8 +1282,8 @@ void dataCollectActionToggle(){
     } 
     else {
         //start collecting
-        if(currentLabelSelection< SCENT_CLASS_PURE_CAMOMILE||currentLabelSelection >= SCENT_CLASS_COUNT){
-            currentLabelSelection = SCENT_CLASS_PURE_CAMOMILE;
+        if(currentLabelSelection< SCENT_CLASS_DECAF_TEA||currentLabelSelection >= SCENT_CLASS_COUNT){
+            currentLabelSelection = SCENT_CLASS_DECAF_TEA;
         }
 
         //make sure logging is active

@@ -112,38 +112,21 @@ typedef enum{
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
 #define ML_DELTA_FEATURES 4 //delta_temp, delta_hum, delta_pres, log_gas_cross
 #define TOTAL_ML_FEATURES 37
-
 //tea classification labels
 typedef enum {
-    SCENT_CLASS_PURE_CAMOMILE,
-    SCENT_CLASS_THOROUGHLY_MINTED_INFUSION,
-    SCENT_CLASS_BERRY_BURST,
-    SCENT_CLASS_DARJEELING_BLEND,
-    SCENT_CLASS_DECAF_NUTMEG_VANILLA,
-    SCENT_CLASS_EARL_GREY,
-    SCENT_CLASS_ENGLISH_BREAKFAST_TEA,
-    SCENT_CLASS_FRESH_ORANGE,
-    SCENT_CLASS_GARDEN_SELECTION_LEMON,
-    SCENT_CLASS_GREEN_TEA,
-    SCENT_CLASS_RASPBERRY,
-    SCENT_CLASS_SWEET_CHERRY,
+    SCENT_CLASS_DECAF_TEA,
+    SCENT_CLASS_DECAF_COFFEE,
+    SCENT_CLASS_TEA,
+    SCENT_CLASS_COFFEE,
     SCENT_CLASS_COUNT,
     SCENT_CLASS_UNKNOWN = 255
 } scent_class_t;
 
 static const char* SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
-    "camomile",
-    "thoroughly minted infusion",
-    "berry burst",
-    "darjeeling blend",
-    "decaf nutmeg and vanilla",
-    "earl grey",
-    "english breakfast tea",
-    "fresh orange",
-    "garden selection (lemon)",
-    "green tea",
-    "raspberry",
-    "sweet cherry"
+    "decaf tea",
+    "decaf coffee",
+    "tea",
+    "coffee"
 };
 typedef enum{
     INFERENCE_MODE_SINGLE= 0,

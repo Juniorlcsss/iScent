@@ -427,48 +427,68 @@ RFNode* RandomForest::buildTree(const std::vector<uint16_t> &sampleIndicies, con
     return node;
 }
 
-void RandomForest::findBestSplit(const std::vector<uint16_t>& sampleIndices,const ml_training_sample_t* samples,const std::vector<uint16_t>& featureSubset,int& bestFeature, float& bestThreshold, float& bestGini){
+void RandomForest::findBestSplit(const std::vector<uint16_t>& sampleIndices,const ml_training_sample_t* samples, const std::vector<uint16_t>& featureSubset,int& bestFeature, float& bestThreshold,float& bestGini) {
     bestGini = 1.0f;
     bestFeature = -1;
     bestThreshold = 0.0f;
 
     uint16_t n = sampleIndices.size();
+    if (n < 2) return;
+
+    uint16_t totalCounts[SCENT_CLASS_COUNT] = {0};
+    for (uint16_t idx : sampleIndices) {
+        if (samples[idx].label < SCENT_CLASS_COUNT)
+            totalCounts[samples[idx].label]++;
+    }
+
+    std::vector<std::pair<float, uint16_t>> sorted;
+    sorted.reserve(n);
+
     for(uint16_t f : featureSubset){
-        //get feature values
-        std::vector<float> featureValues;
-        featureValues.reserve(n);
+        sorted.clear();
         for(uint16_t idx : sampleIndices){
-            featureValues.push_back(samples[idx].features[f]);
+            sorted.push_back({samples[idx].features[f], idx});
         }
+        
+        std::sort(sorted.begin(), sorted.end(),[](const std::pair<float, uint16_t>& a, const std::pair<float, uint16_t>& b) {
+                return a.first < b.first;
+            });
 
-        //unique & sort
-        std::set<float> uniqueValues(featureValues.begin(), featureValues.end());
-        std::vector<float> thresholds(uniqueValues.begin(), uniqueValues.end());
-        std::sort(thresholds.begin(), thresholds.end());
+        uint16_t leftCounts[SCENT_CLASS_COUNT] = {0};
+        uint16_t rightCounts[SCENT_CLASS_COUNT];
+        memcpy(rightCounts, totalCounts, sizeof(rightCounts));
 
-        //try splits
-        for(size_t t=1; t<thresholds.size(); t++){
-            float threshold = (thresholds[t-1] + thresholds[t]) / 2.0f;
+        uint16_t leftSize = 0;
 
-            std::vector<uint16_t> left, right;
-            for(uint16_t idx : sampleIndices){
-                if(samples[idx].features[f] < threshold){
-                    left.push_back(idx);
-                }else{
-                    right.push_back(idx);
-                }
+        for(uint16_t i = 0; i < n - 1; i++){
+            scent_class_t label=samples[sorted[i].second].label;
+            if (label < SCENT_CLASS_COUNT) {
+                leftCounts[label]++;
+                rightCounts[label]--;
+            }
+            leftSize++;
+            uint16_t rightSize = n - leftSize;
+
+            if(sorted[i].first == sorted[i + 1].first) continue;
+
+            float leftGini = 1.0f;
+            for(int c = 0; c < SCENT_CLASS_COUNT; c++){
+                float p = (float)leftCounts[c]/leftSize;
+                leftGini -= p * p;
             }
 
-            if(left.empty() || right.empty()) continue;
+            float rightGini = 1.0f;
+            for(int c = 0; c <SCENT_CLASS_COUNT;c++) {
+                float p = (float)rightCounts[c]/rightSize;
+                rightGini -=p*p;
+            }
 
-            float leftGini = calculateGini(left, samples);
-            float rightGini = calculateGini(right, samples);
-            float weightedGini = (left.size() * leftGini + right.size() * rightGini) / n;
+            float weightedGini=(leftSize*leftGini + rightSize*rightGini) / n;
 
             if(weightedGini < bestGini){
                 bestGini = weightedGini;
                 bestFeature = f;
-                bestThreshold = threshold;
+                bestThreshold = (sorted[i].first + sorted[i + 1].first) * 0.5f;
             }
         }
     }
