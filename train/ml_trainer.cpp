@@ -274,6 +274,145 @@ void augmentTrainingData(csv_training_sample_t*& trainSet, uint16_t& trainCount,
     for(uint16_t i=0; i <trainCount; i++) trainSet[i]=augmented[i];
 }
 
+//cross validation
+struct CVResults{
+    float meanAcc;
+    float stdAcc;
+    float foldAcc[10];
+    int foldCount;
+    ml_metrics_t aggregateMetrics;
+};
+
+CVResults crossValidateRF(csv_training_sample_t* allSamples, uint16_t totalCount,uint16_t featureCount, int numFolds,int numTrees, int maxDepth,int minSamples,float subsetRatio,const float* means,const float* stds,const FeatureSelector& selector){
+    CVResults results={};
+    results.foldCount=numFolds;
+    memset(&results.aggregateMetrics, 0, sizeof(ml_metrics_t));
+
+    //group
+    std::vector<std::vector<uint16_t>> classIndices(SCENT_CLASS_COUNT);
+    for(uint16_t i=0; i<totalCount;i++){
+        if(allSamples[i].label< SCENT_CLASS_COUNT){
+            classIndices[allSamples[i].label].push_back(i);
+        }
+    }
+
+    //shuffle
+    std::mt19937 rng(1337);
+    for(int i=0; i<SCENT_CLASS_COUNT;i++){
+        std::shuffle(classIndices[i].begin(), classIndices[i].end(), rng);
+    }
+
+    //assign
+    std::vector<int> foldAssignment(totalCount, -1);
+    for(int i=0; i<SCENT_CLASS_COUNT;i++){
+        for(size_t j=0; j<classIndices[i].size();j++){
+            foldAssignment[classIndices[i][j]]=j % numFolds;
+        }
+    }
+
+    float totalAcc=0;
+    int totalCorrect=0, totalSamples=0;
+
+    for(int fold=0; fold<numFolds;fold++){
+        //split
+        std::vector<csv_training_sample_t> trainFold, testFold;
+        for(uint16_t i=0; i<totalCount;i++){
+            if(foldAssignment[i]==fold){
+                testFold.push_back(allSamples[i]);
+            }
+            else{
+                trainFold.push_back(allSamples[i]);
+            }
+        }
+        
+        if(trainFold.empty() || testFold.empty()){
+            continue;
+        }
+
+        //zscore
+        float foldMeans[CSV_FEATURE_COUNT]={0};
+        float foldStds[CSV_FEATURE_COUNT]={0};
+
+        for(int i=0; i<CSV_FEATURE_COUNT;i++){
+            double sum=0;
+
+            for(const auto &s: trainFold){
+                sum+=s.features[i];
+            }
+            foldMeans[i]= sum / trainFold.size();
+
+            double varSum=0;
+            for(const auto &s:trainFold){
+                varSum+= (s.features[i]-foldMeans[i])*(s.features[i]-foldMeans[i]);
+            }
+            foldStds[i]= sqrt(varSum / trainFold.size());
+            if(foldStds[i]<1e-6f){
+                foldStds[i]=1.0f;
+            }
+        }
+
+        for(auto &i: testFold){
+            for(int j=0; j<CSV_FEATURE_COUNT;j++){
+                i.features[j]= (i.features[j]-foldMeans[j]) / foldStds[j];
+            }
+        }
+        for(auto &i: trainFold){
+            for(int j=0; j<CSV_FEATURE_COUNT;j++){
+                i.features[j]= (i.features[j]-foldMeans[j]) / foldStds[j];
+            }
+        }
+
+        uint16_t selectedFeat= selector.selectedCount;
+        std::vector<csv_training_sample_t> trainProj(trainFold.size());
+        std::vector<csv_training_sample_t> testProj(testFold.size());
+        selector.projectDataset(trainFold.data(), trainFold.size(), trainProj.data());
+        selector.projectDataset(testFold.data(), testFold.size(), testProj.data());
+
+        //augment
+        uint16_t augTrainCount=trainProj.size();
+        csv_training_sample_t* augTrain=new csv_training_sample_t[augTrainCount];
+        memcpy(augTrain, trainProj.data(), augTrainCount * sizeof(csv_training_sample_t));
+
+        std::default_random_engine augRng(42+fold);
+        augmentTrainingData(augTrain, augTrainCount, selectedFeat, augRng);
+
+        //train rf
+        RandomForest rf(numTrees, maxDepth, minSamples, subsetRatio);
+        rf.train(augTrain, augTrainCount, selectedFeat);
+
+        //evaluate
+        ml_metrics_t m=rf.evaluate(testProj.data(), testProj.size());
+
+        results.foldAcc[fold]=m.accuracy;
+        totalAcc +=m.accuracy;
+        totalCorrect+=m.correct;
+        totalSamples+=m.total;
+
+        for(int i=0; i<SCENT_CLASS_COUNT;i++){
+            for(int j=0; j<SCENT_CLASS_COUNT;j++){
+                results.aggregateMetrics.confusionMatrix[i][j]+=m.confusionMatrix[i][j];
+            }
+        }
+
+        std::cout << "    Fold " << (fold + 1) << "/" << numFolds<< ": " << std::fixed << std::setprecision(1)
+        << (m.accuracy * 100) << "% (" << m.correct << "/" << m.total << ")"<< std::endl;
+
+        delete[] augTrain;
+    }
+
+    results.meanAcc= totalAcc / numFolds;
+    results.aggregateMetrics.correct= totalCorrect;
+    results.aggregateMetrics.total= totalSamples;
+    results.aggregateMetrics.accuracy= (totalSamples > 0) ? ((float)totalCorrect / totalSamples) : 0.0f;
+
+    float varSum=0;
+    for(int i=0; i<numFolds;i++){
+        varSum+= (results.foldAcc[i] - results.meanAcc) * (results.foldAcc[i] - results.meanAcc);
+    }
+    results.stdAcc= sqrt(varSum / numFolds);
+    return results;
+}
+
 
 //experiment
 void twoStageExperiment(const csv_training_sample_t* trainSet, uint16_t trainCount, const csv_training_sample_t* testSet, uint16_t testCount,uint16_t featureCount){
@@ -537,46 +676,67 @@ int main(int argc, char* argv[]){
     //========================================================
     //RF
     //========================================================
-    std::cout << "\n=== Training Random Forest ===" << std::endl;
-    RandomForest* bestRf=nullptr;
-    float bestRfAcc=0.0f;
-    uint16_t bestNumTrees=0;
+    std::cout << "\n=== Cross-Validated Random Forest Search ===" << std::endl;
+
+    csv_training_sample_t* rawSamples = loader.getSamples();
+    uint16_t rawCount = loader.getSampleCount();
+
+    struct RFConfig {
+        int trees;
+        int depth;
+        float sr;
+        float cvMean;
+        float cvStd;
+    };
+    std::vector<RFConfig> rfConfigs;
 
     {
-        Timer t("Random Forest Grid Search");
+        Timer t("Random Forest CV Grid Search");
         std::cout << std::endl;
 
-        for(int trees : {50, 100, 200}){
-            for(int depth : {10, 14}){
-                for(float sr : {0.3f, 0.5f}){
-                    std::cout << "  RF t="<< trees << " d=" << depth<< " sr=" << sr << " ..." << std::flush;
+        for(int trees :{100, 200}){
+            for(int depth : {12, 14, 16}){
+                for (float sr:{0.25f, 0.3f, 0.35f}){
+                    std::cout << "\n  Config: t=" << trees << " d=" << depth<< " sr=" << sr << std::endl;
 
-                    RandomForest* rfTest=new RandomForest(trees, depth, 3, sr);
-                    rfTest->train(trainSet, trainCount, reducedFeatureCount);
+                    CVResults cv = crossValidateRF(rawSamples, rawCount,
+                        CSV_FEATURE_COUNT, 5,
+                        trees, depth, 3, sr,
+                        feature_means, feature_stds, selector);
 
-                    ml_metrics_t m=rfTest->evaluate(testSet, testCount);
+                    std::cout << "  => Mean: " << std::fixed << std::setprecision(1)<< (cv.meanAcc * 100) << "% +/- "<< (cv.stdAcc * 100) << "%" << std::endl;
 
-                    std::cout << " acc=" << std::fixed << std::setprecision(1)<< (m.accuracy * 100) << "% oob="<< (rfTest->getOOBError() * 100) << "%" << std::endl;
-
-                    if(m.accuracy > bestRfAcc){
-                        bestRfAcc=m.accuracy;
-                        bestNumTrees=trees;
-                        delete bestRf;
-                        bestRf=rfTest;
-                    } 
-                    else{
-                        delete rfTest;
-                    }
+                    rfConfigs.push_back({trees, depth, sr, cv.meanAcc, cv.stdAcc});
                 }
             }
         }
     }
 
-    ml_metrics_t rfMetrics=bestRf->evaluate(testSet, testCount);
-    printMetrics(rfMetrics, "Random Forest");
+    auto bestConfig = std::max_element(rfConfigs.begin(), rfConfigs.end(),[](const RFConfig& a, const RFConfig& b) { return a.cvMean < b.cvMean; });
+
+    std::cout << "\nBest CV Config: t=" << bestConfig->trees<< " d=" << bestConfig->depth << " sr=" << bestConfig->sr
+    << " cv=" << std::fixed << std::setprecision(1)<< (bestConfig->cvMean * 100) << "% +/- "<< (bestConfig->cvStd * 100)<< "%" << std::endl;
+
+    //full cv
+    std::cout << "\nFull 5-fold CV with best config:" << std::endl;
+    CVResults bestCV = crossValidateRF(rawSamples, rawCount,CSV_FEATURE_COUNT, 5, bestConfig->trees, bestConfig->depth, 3, bestConfig->sr,feature_means, feature_stds, selector);
+
+    std::cout << "\nAggregate CV Results:" << std::endl;
+    printConfusionMatrix(bestCV.aggregateMetrics);
+    printPerClassMetrics(bestCV.aggregateMetrics);
+
+    //final model
+    std::cout << "\nTraining final model on full training set..." << std::endl;
+    RandomForest* bestRf = new RandomForest(bestConfig->trees, bestConfig->depth,3, bestConfig->sr);
+    bestRf->train(trainSet, trainCount, reducedFeatureCount);
+    ml_metrics_t rfMetrics = bestRf->evaluate(testSet, testCount);
+
+    printMetrics(rfMetrics, "Random Forest (holdout)");
     printPerClassMetrics(rfMetrics);
     printConfusionMatrix(rfMetrics);
     bestRf->printFeatureImportance();
+
+    std::cout << "\nNOTE: CV accuracy (" << std::fixed << std::setprecision(1)<< (bestCV.meanAcc * 100) << "%) is more reliable than holdout ("<< (rfMetrics.accuracy * 100) << "%)" << std::endl;
 
     //save
     dt.saveModel("dt_model.bin");
