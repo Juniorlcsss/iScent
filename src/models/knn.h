@@ -23,7 +23,7 @@ public:
     scent_class_t predict(const float *features, uint16_t featureCount) const;
 
     void train(const ml_training_sample_t* samples, uint16_t count);
-    ml_metrics_t evaluate(const ml_training_sample_t* samples, uint16_t sampleCount) const;
+    ml_metrics_t evaluate(const ml_training_sample_t* samples, uint16_t sampleCount, uint16_t featureCount=KNN_FEATURE_COUNT) const;
 
     scent_class_t predictWithConfidence(const float* features, uint16_t featureCount, float& confidence)const;
     void setK(uint8_t k){ _k = k; }

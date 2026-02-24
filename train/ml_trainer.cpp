@@ -181,6 +181,185 @@ struct FeatureSelector {
         std::cout << "\nSelected " << selectedCount << "/" << featureCount << " features" << std::endl;
     }
 
+    void selectFeaturesHybrid(const csv_training_sample_t *samples, uint16_t count, int featureCount, int maxFeatures=45){
+        originalCount = featureCount;
+
+        struct FeatureScore {
+            int index;
+            float globalF;
+            float teaPairF;
+            float coffeePairF;
+            float score;
+        };
+
+        std::vector<FeatureScore> scores(featureCount);
+
+        auto pair = [&](int f, scent_class_t classA, scent_class_t classB) -> float {
+
+            float meanA=0.0f, meanB=0.0f;
+            float varA=0.0f, varB=0.0f;
+            int countA=0, countB=0;
+
+            for(int i=0; i<count;i++){
+                if(samples[i].label==classA){
+                    meanA+=samples[i].features[f];
+                    countA++;
+                }
+                else if(samples[i].label==classB){
+                    meanB+=samples[i].features[f];
+                    countB++;
+                }
+            }
+            if(countA==0 ||countB==0){
+                return 0.0f;
+            }
+            meanA/= countA;
+            meanB/= countB;
+
+            for(int i=0; i<count;i++){
+                if(samples[i].label==classA){
+                    float d=samples[i].features[f] - meanA;
+                    varA+= d * d;
+                }
+                else if(samples[i].label==classB){
+                    float d=samples[i].features[f] - meanB;
+                    varB+= d * d;
+                }
+            }
+
+            float pooledVar=(varA+varB)/(countA + countB - 2);
+            if(pooledVar < 1e-8f){
+                return 0.0f;
+            }
+            float diff=meanA-meanB;
+            return (diff * diff) / pooledVar;
+        };
+
+        for(int f=0; f<featureCount;f++){
+            scores[f].index=f;
+
+            {
+                float classMeans[SCENT_CLASS_COUNT]={0};
+                float classVars[SCENT_CLASS_COUNT]={0};
+                float classCounts[SCENT_CLASS_COUNT]={0};
+
+                for(int j=0; j<count;j++){
+                    int c=samples[j].label;
+                    if(c>= SCENT_CLASS_COUNT){
+                        continue;
+                    }
+
+                    classMeans[c]+=samples[j].features[f];
+                    classCounts[c]++;
+                }
+
+                float grandMean=0.0f;
+                int totalValid=0;
+                for(int j=0; j<SCENT_CLASS_COUNT; j++){
+                    if(classCounts[j]>0){
+                        classMeans[j] /= classCounts[j];
+                    }
+                }
+                if(totalValid>0){
+                    grandMean/= totalValid;
+                }
+
+                for(int i=0; i<count;i++){
+                    int c=samples[i].label;
+                    if(c>= SCENT_CLASS_COUNT){
+                        continue;
+                    }
+                    float d = samples[i].features[f] - classMeans[c];
+                    classVars[c] += d * d;
+                }
+
+                float betweenVar=0.0f, withinVar=0.0f;
+                for(int i=0; i<SCENT_CLASS_COUNT;i++){
+                    if(classCounts[i]>0){
+                        float d=classMeans[i] - grandMean;
+                        betweenVar+= classCounts[i] * d * d;
+                        withinVar+= classVars[i];
+                    }
+                }
+
+                scores[f].globalF=(withinVar>1e-8f) ?(betweenVar/(SCENT_CLASS_COUNT-1))/(withinVar/(totalValid-SCENT_CLASS_COUNT)) : 0.0f;
+            }
+
+            scores[f].teaPairF= pair(f, SCENT_CLASS_DECAF_TEA, SCENT_CLASS_TEA);
+            scores[f].coffeePairF= pair(f, SCENT_CLASS_DECAF_COFFEE, SCENT_CLASS_COFFEE);
+        }
+
+        float maxG = 0.0f, maxT = 0.0f, maxC = 0.0f;
+        for(int f=0; f<featureCount; f++){
+            if(scores[f].globalF > maxG){
+                maxG = scores[f].globalF;
+            }
+            if(scores[f].teaPairF > maxT){
+                maxT = scores[f].teaPairF;
+            }
+            if(scores[f].coffeePairF > maxC){
+                maxC = scores[f].coffeePairF;
+            }
+        }
+        if(maxG < 1e-8f){
+            maxG = 1.0f;
+        }
+        if(maxT < 1e-8f){
+            maxT = 1.0f;
+        }
+        if(maxC < 1e-8f){
+            maxC = 1.0f;
+        }
+
+        for(int f=0; f<featureCount; f++){
+            float normG = scores[f].globalF / maxG;
+            float normT = scores[f].teaPairF / maxT;
+            float normC = scores[f].coffeePairF / maxC;
+
+            //tea pair is the bottleneck, weight it heavily!!
+            scores[f].score = 0.3f * normG + 0.45f * normT + 0.25f * normC;
+        }
+
+        std::sort(scores.begin(), scores.end(),
+            [](const FeatureScore& a, const FeatureScore& b){
+                return a.score > b.score;
+        });
+
+        std::cout << "\n=== Hybrid Feature Ranking ===" << std::endl;
+        std::cout << "  [*]=selected, [ ]=dropped\n" << std::endl;
+
+        selectedIndices.clear();
+        float minScore = 0.05f;
+
+        for(int i=0; i<featureCount; i++){
+            float normG = scores[i].globalF / maxG;
+            float normT = scores[i].teaPairF / maxT;
+            float normC = scores[i].coffeePairF / maxC;
+
+            bool selected = ((int)selectedIndices.size() < maxFeatures 
+                            && scores[i].score >= minScore);
+            if(selected) selectedIndices.push_back(scores[i].index);
+
+            std::cout << "  " << (selected ? "[*]" : "[ ]")
+                    << " S=" << std::setw(6) << std::fixed << std::setprecision(3) 
+                    << scores[i].score
+                    << "(Gn=" << std::setprecision(2) << normG
+                    << "Tn=" << normT
+                    << "Cn=" << normC
+                    << "raw G=" << std::setprecision(1) << scores[i].globalF
+                    << "T=" << scores[i].teaPairF
+                    << "C=" << scores[i].coffeePairF
+                    << ")  [" << std::setw(2) << scores[i].index << "] "
+                    << shortFeatureName(scores[i].index) << std::endl;
+        }
+
+        std::sort(selectedIndices.begin(), selectedIndices.end());
+        selectedCount = selectedIndices.size();
+        std::cout << "\nSelected " << selectedCount << "/" << featureCount << " features" << std::endl;
+        std::cout << "Score scale maxima: G=" << std::setprecision(1) << maxG << " T=" << maxT << " C=" << maxC << std::endl;
+    
+    }
+
     void projectDataset(const csv_training_sample_t* src, uint16_t count,
                         csv_training_sample_t* dst) const {
         for(uint16_t i=0; i < count; i++){
@@ -541,11 +720,55 @@ int main(int argc, char* argv[]){
         sf << "};\n\n#endif\n";
     }
 
+    //batch effect 
+    std::cout << "\nChecking for batch effects..." << std::endl;
+
+    for(int i=0; i<SCENT_CLASS_COUNT;i++){
+        std::vector<uint16_t> idx;
+        for(uint16_t j=0;j<trainCount;j++){
+            if(trainSet[j].label == i){
+                idx.push_back(j);
+            }
+        }
+        if(idx.size()<20){
+            continue;
+        }
+
+        uint16_t mid=idx.size()/2;
+
+        std::cout << "\n  " << CSVLoader::getClassName((scent_class_t)i)<< " (" << idx.size() << " samples):" << std::endl;
+
+        int checkFeat[] ={20, 21, 22, 23, 25, 27, 30, 31, 33, 35, 37, 42, 47, 70, 71};
+
+        for(int f:checkFeat){
+            if(f>= CSV_FEATURE_COUNT){
+                continue;
+            }
+
+            float s1=0.0f, s2=0.0f;
+
+            for(uint16_t j=0; j<mid;j++){
+                s1+=trainSet[idx[j]].features[f];
+            }
+            for(uint16_t j=mid; j<idx.size();j++){
+                s2+=trainSet[idx[j]].features[f];
+            }
+
+            float m1= s1 / mid;
+            float m2= s2 / (idx.size() - mid);
+            float shift= fabsf(m1 - m2);
+
+            if(shift>0.3f){
+                std::cout << "[!]"<< shortFeatureName(f) << ":first_half=" << std::fixed << std::setprecision(2) << m1<< " second_half=" << m2<< " shift=" << shift << " std" << std::endl;
+            }
+        }
+    }
+
     //feature selection
     FeatureSelector selector;
     {
-        Timer t("Feature Selection");
-        selector.selectFeatures(trainSet, trainCount, CSV_FEATURE_COUNT, 0.5f, 45);
+        Timer t("Feature Selection (hybrid)");
+        selector.selectFeaturesHybrid(trainSet, trainCount, CSV_FEATURE_COUNT, 45);
     }
     selector.saveHeader("feature_select.h", feature_means, feature_stds);
 
@@ -572,18 +795,27 @@ int main(int argc, char* argv[]){
     memcpy(knnTrainSet, trainSet, trainCount * sizeof(csv_training_sample_t));
 
     //aug
-    {
+    bool useAugmentation=false; //leave off for now
+
+    if(useAugmentation){
         Timer t("Data Augmentation");
         std::default_random_engine rng(42);
         augmentTrainingData(trainSet, trainCount, reducedFeatureCount, rng);
-    }
 
-    std::cout << "Augmented: " << trainCount << " samples" << std::endl;
-    for(int c=0; c < SCENT_CLASS_COUNT; c++){
-        int cnt=0;
-        for(int j=0; j < trainCount; j++)
-            if (trainSet[j].label == c) cnt++;
-        std::cout << "  " << CSVLoader::getClassName((scent_class_t)c) << ": " << cnt << std::endl;
+        std::cout << "Augmented: " << trainCount << " samples" << std::endl;
+        for(int c=0; c < SCENT_CLASS_COUNT; c++){
+            int cnt=0;
+
+            for(int j=0; j < trainCount; j++){
+                if (trainSet[j].label == c){
+                    cnt++;
+                }
+            }
+            std::cout << "  " << CSVLoader::getClassName((scent_class_t)c) << ": " << cnt << std::endl;
+        }
+    }
+    else{
+        std::cout << "\nData augmentation skipped" << std::endl;
     }
 
     //========================================================

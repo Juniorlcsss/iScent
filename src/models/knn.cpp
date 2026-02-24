@@ -141,7 +141,7 @@ scent_class_t KNN::predictWithConfidence(const float* features, uint16_t feature
     return predClass;
 }
 
-ml_metrics_t KNN::evaluate(const ml_training_sample_t *samples, uint16_t count) const{
+ml_metrics_t KNN::evaluate(const ml_training_sample_t *samples, uint16_t count, uint16_t featureCount) const{
     ml_metrics_t metrics ={};
     metrics.total = count;
     metrics.correct = 0;
@@ -154,7 +154,7 @@ ml_metrics_t KNN::evaluate(const ml_training_sample_t *samples, uint16_t count) 
     }
 
     for(uint16_t i=0; i<count; i++){
-        scent_class_t pred = predict(samples[i].features, KNN_FEATURE_COUNT);
+        scent_class_t pred = predict(samples[i].features, featureCount);
         scent_class_t actual = samples[i].label;
 
         if(pred == actual){
