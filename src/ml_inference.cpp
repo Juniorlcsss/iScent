@@ -1,7 +1,7 @@
 #include "ml_inference.h"
 #include <LittleFS.h>
 #include <ctype.h>
-#include "feature_stats.h"
+#include "model headers/feature_select.h"
 
 #if EI_CLASSIFIER
 #include "iScent_inferencing.h"
@@ -12,6 +12,9 @@
 #include "model headers/rf_model_header.h"
 #include "ensemble_weights.h"
 
+#if SELECTED_FEATURE_COUNT != TOTAL_ML_FEATURES
+  #error "TOTAL_ML_FEATURES in config.h must match SELECTED_FEATURE_COUNT from feature_select.h"
+#endif
 
 MLInference::MLInference():
     _window_index(0),
@@ -97,30 +100,18 @@ bool MLInference::isReady() const{
 //===========================================================================================================
 
 bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data) {
-    uint16_t idx = 0;
-    memset(_feature_buffer.features, 0, sizeof(_feature_buffer.features));
+    memset(_feature_buffer.features, 0,sizeof(_feature_buffer.features));
 
-    // Store all heater steps
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        _feature_buffer.features[idx++] = sensor_data.primary.gas_resistances[i];
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        _feature_buffer.features[i] = sensor_data.primary.gas_resistances[i];
     }
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        _feature_buffer.features[idx++] = sensor_data.secondary.gas_resistances[i];
+    for(uint8_t i=0; i<BME688_NUM_HEATER_STEPS;i++){
+        _feature_buffer.features[BME688_NUM_HEATER_STEPS + i] = sensor_data.secondary.gas_resistances[i];
     }
 
-    // Store raw environmental values
-    _feature_buffer.features[idx++] = sensor_data.primary.temperatures[0];
-    _feature_buffer.features[idx++] = sensor_data.primary.humidities[0];
-    _feature_buffer.features[idx++] = sensor_data.primary.pressures[0];
-    _feature_buffer.features[idx++] = sensor_data.secondary.temperatures[0];
-    _feature_buffer.features[idx++] = sensor_data.secondary.humidities[0];
-    _feature_buffer.features[idx++] = sensor_data.secondary.pressures[0];
-
-    _feature_buffer.featureCount = idx;
-    
-    // Self-normalise (no baseline needed)
+    _feature_buffer.featureCount=BME688_NUM_HEATER_STEPS * 2;
     normaliseFeatures(_feature_buffer);
-    
+
     _feature_buffer.ready = true;
     return true;
 }
@@ -655,7 +646,7 @@ bool MLInference::exportTrainingData(const char* file){
 
     //write header
     f.printf("timestamp,label");
-    for(uint16_t i=0; i<TOTAL_ML_FEATURES;i++){
+    for(int i=0; i<TOTAL_ML_FEATURES;i++){
         f.printf(",feature_%d", i);
     }
     f.println();
@@ -663,7 +654,7 @@ bool MLInference::exportTrainingData(const char* file){
     //write samples
     for(uint16_t s =0; s< _training_sample_count; s++){
         f.printf("%lu,%d", _training_samples[s].timestamp, _training_samples[s].label);
-        for(uint16_t i = 0; i<TOTAL_ML_FEATURES; i++){
+        for(int i = 0; i<TOTAL_ML_FEATURES; i++){
             f.printf(",%f", _training_samples[s].features[i]);
         }
         f.println();
@@ -1141,111 +1132,223 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
 //===========================================================================================================
 
 void MLInference::normaliseFeatures(ml_feature_buffer_t& features) {
-    uint16_t srcIdx = 0;
+    const uint8_t steps = BME688_NUM_HEATER_STEPS;
 
-    float gas1_raw[BME688_NUM_HEATER_STEPS];
-    float gas2_raw[BME688_NUM_HEATER_STEPS];
-
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        gas1_raw[i] = features.features[srcIdx++];
-    }
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        gas2_raw[i] = features.features[srcIdx++];
+    //read raw gas resistances
+    float _gas1[steps], _gas2[steps];
+    for(uint8_t i=0; i<steps;i++){
+        _gas1[i] = features.features[i];
+        _gas2[i] = features.features[i+steps];
     }
 
-    float temp1_raw = features.features[srcIdx++];
-    float hum1_raw  = features.features[srcIdx++];
-    float pres1_raw = features.features[srcIdx++];
-    float temp2_raw = features.features[srcIdx++];
-    float hum2_raw  = features.features[srcIdx++];
-    float pres2_raw = features.features[srcIdx++];
-
-    // Self-normalise: divide by own scan mean
-    float gas1_mean = computeMean(gas1_raw, BME688_NUM_HEATER_STEPS);
-    float gas2_mean = computeMean(gas2_raw, BME688_NUM_HEATER_STEPS);
-    if(gas1_mean < 1.0f) gas1_mean = 1.0f;
-    if(gas2_mean < 1.0f) gas2_mean = 1.0f;
-
-    uint16_t featureIdx = 0;
-
-    float gas1_norm[BME688_NUM_HEATER_STEPS];
-    float gas2_norm[BME688_NUM_HEATER_STEPS];
-
-    // Per-sensor normalised response (shape preserved, absolute magnitude removed)
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        gas1_norm[i] = gas1_raw[i] / gas1_mean;
-        features.features[featureIdx++] = gas1_norm[i];
+    //self normalise
+    float _gas1_mean =computeMean(_gas1,steps);
+    float _gas2_mean = computeMean(_gas2, steps);
+    if(_gas1_mean <1.0f){
+        _gas1_mean = 1.0f;
     }
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        gas2_norm[i] = gas2_raw[i] / gas2_mean;
-        features.features[featureIdx++] = gas2_norm[i];
+    if(_gas2_mean < 1.0f){
+        _gas2_mean = 1.0f;
     }
 
-    // Cross-sensor ratio (cancels shared environmental drift)
-    for(uint8_t i = 0; i < BME688_NUM_HEATER_STEPS; i++){
-        features.features[featureIdx++] = (gas2_norm[i] > 0.01f) ? 
-            gas1_norm[i] / gas2_norm[i] : 1.0f;
+    float _gas1_norm[steps],_gas2_norm[steps];
+    for(uint8_t i=0;i<steps;i++){
+        _gas1_norm[i]=_gas1[i]/_gas1_mean;
+        _gas2_norm[i]=_gas2[i]/_gas2_mean;
     }
 
-    // Shape features — slope of normalised response across heater steps
-    features.features[featureIdx++] = computeSlope(gas1_norm, BME688_NUM_HEATER_STEPS);
-    features.features[featureIdx++] = computeSlope(gas2_norm, BME688_NUM_HEATER_STEPS);
+    //NOW FOR ALL THE FEATURES :PPP
 
-    // Curvature — difference between high-temp and low-temp slope
-    uint8_t half = BME688_NUM_HEATER_STEPS / 2;
-    float s1_low  = computeSlope(gas1_norm, half);
-    float s1_high = computeSlope(gas1_norm + half, BME688_NUM_HEATER_STEPS - half);
-    float s2_low  = computeSlope(gas2_norm, half);
-    float s2_high = computeSlope(gas2_norm + half, BME688_NUM_HEATER_STEPS - half);
-    features.features[featureIdx++] = s1_high - s1_low;
-    features.features[featureIdx++] = s2_high - s2_low;
+    float featureArray[ORIGINAL_FEATURE_COUNT];
+    uint16_t idx=0;
 
-    // Environmental differentials (dual-sensor cancellation)
-    features.features[featureIdx++] = fabsf(temp1_raw - temp2_raw);
-    features.features[featureIdx++] = fabsf(hum1_raw - hum2_raw);
-    features.features[featureIdx++] = fabsf(pres1_raw - pres2_raw);
+    //0-9
+    for(uint8_t i=0; i<steps; i++){
+        featureArray[idx++] = _gas1_norm[i];
+    }
 
-    features.featureCount = featureIdx;
+    //10-19
+    for(uint8_t i=0; i<steps; i++){
+        featureArray[idx++] = _gas2_norm[i];
+    }
 
-    // Z-score normalisation against training statistics
-    for(int i = 0; i < features.featureCount; i++){
-        if(FEATURE_STDS[i] > 1e-6f){
-            features.features[i] = (features.features[i] - FEATURE_MEANS[i]) / FEATURE_STDS[i];
+    //20-29
+    float cross[steps];
+    for(uint8_t i=0;i<steps;i++){
+        cross[i]= (_gas2_norm[i]>0)?(_gas1_norm[i]/_gas2_norm[i]):1.0f;
+        featureArray[idx++] = cross[i];
+    }
+
+    //30-39
+    for(uint8_t i=0; i<steps;i++){
+        featureArray[idx++]= _gas1_norm[i] - _gas2_norm[i];
+    }
+
+    //40-48
+    for(uint8_t i=0; i<steps-1;i++){
+        featureArray[idx++]= _gas1_norm[i+1] - _gas1_norm[i];
+    }
+
+    //49-57
+    for(uint8_t i=0; i<steps-1;i++){
+        featureArray[idx++]= _gas2_norm[i+1] - _gas2_norm[i];
+    }
+
+    //58
+    featureArray[idx++]=computeSlope(_gas1_norm, steps);
+    //59
+    featureArray[idx++]=computeSlope(_gas2_norm, steps);
+
+    //60
+    {
+        uint8_t h=steps/2;
+        float steps_low= computeSlope(_gas1_norm, h);
+        float steps_high = computeSlope(_gas1_norm + h, steps - h);
+        featureArray[idx++] = steps_high - steps_low;
+    }
+
+    //61
+    {
+        uint8_t h=steps/2;
+        float steps_low= computeSlope(_gas2_norm, h);
+        float steps_high = computeSlope(_gas2_norm + h, steps - h);
+        featureArray[idx++] = steps_high - steps_low;
+    }
+
+    //62
+    {
+        float auc=0.0f;
+        for(uint8_t i=0; i<steps-1;i++){
+            auc+=(_gas1_norm[i]+_gas1_norm[i+1])/2.0f;
         }
+        featureArray[idx++] = auc;
     }
 
-    features.ready = true;
+    //63
+    {
+        float auc=0.0f;
+        for(uint8_t i=0; i<steps-1;i++){
+            auc+=(_gas2_norm[i]+_gas2_norm[i+1])/2.0f;
+        }
+        featureArray[idx++] = auc;
+    }
+
+    //64
+    {
+        uint8_t peakIdx=0;
+        float peakVal=_gas1_norm[0];
+        for(uint8_t i=1;i<steps;i++){
+            if(_gas1_norm[i]>peakVal){
+                peakVal=_gas1_norm[i];
+                peakIdx=i;
+            }
+        }
+        featureArray[idx++]=(float)peakIdx;
+    }
+
+    //65
+    {
+        uint8_t peakIdx=0;
+        float peakVal=_gas2_norm[0];
+        for(uint8_t i=1;i<steps;i++){
+            if(_gas2_norm[i]>peakVal){
+                peakVal=_gas2_norm[i];
+                peakIdx=i;
+            }
+        }
+        featureArray[idx++]=(float)peakIdx;
+    }
+
+    //66
+    featureArray[idx++]=computeMax(_gas1_norm, steps) - computeMin(_gas1_norm, steps);
+    //SIXSEVENNNN
+    featureArray[idx++]=computeMax(_gas2_norm, steps) - computeMin(_gas2_norm, steps);
+
+    //68
+    {
+        uint8_t h=steps/2;
+        float early=computeMean(_gas1_norm, h);
+        float late=computeMean(_gas1_norm + h, steps - h);
+        featureArray[idx++]= (early > 0.01f) ? (late / early) : 1.0f;
+    }
+    //69
+    {
+        uint8_t h=steps/2;
+        float early=computeMean(_gas2_norm, h);
+        float late=computeMean(_gas2_norm + h, steps - h);
+        featureArray[idx++]= (early > 0.01f) ? (late / early) : 1.0f;
+    }
+
+    //70
+    featureArray[idx++]=computeMean(cross,steps);
+
+    //71
+    featureArray[idx++]=computeSlope(cross, steps);
+
+    //72
+    {
+        float crossMean = computeMean(cross, steps);
+        float var = 0.0f;
+        for(uint8_t i=0; i<steps; i++){
+            float diff=cross[i]-crossMean;
+            var+= diff*diff;
+        }
+        featureArray[idx++]=var/steps;
+    }
+
+    //check!!
+    if(idx!=ORIGINAL_FEATURE_COUNT){
+        DEBUG_PRINTF("[MLInference] Feature extraction error: expected %d features but got %d\n", ORIGINAL_FEATURE_COUNT, idx);
+    }
+
+    //zscore
+    for(int i=0;i<SELECTED_FEATURE_COUNT;i++){
+        int idx=SELECTED_INDICES[i];
+        float val=featureArray[idx];
+
+        if(SELECTED_STDS[i]>1e-6f){
+            val=(val-SELECTED_MEANS[i])/SELECTED_STDS[i];
+        }
+        features.features[i]=val;
+    }
+    features.featureCount=SELECTED_FEATURE_COUNT;
+    features.ready=true;
 }
 
 void MLInference::printFeatureDebug() const {
     DEBUG_PRINTLN(F("\n=== Feature Debug ==="));
-    DEBUG_PRINTF("Feature count: %d (expected: %d)\n", _feature_buffer.featureCount, TOTAL_ML_FEATURES);
-    
-    const char* sections[] = {
-        "gas1_norm", "gas2_norm", "gas_cross", 
-        "slope1", "slope2", "curve1", "curve2",
-        "d_temp", "d_hum", "d_pres"
+    DEBUG_PRINTF("Pipeline: %d raw gas values -> %d full features -> %d selected (z-scored)\n",
+                 BME688_NUM_HEATER_STEPS * 2, ORIGINAL_FEATURE_COUNT, SELECTED_FEATURE_COUNT);
+    DEBUG_PRINTF("Feature count in buffer: %d (expected: %d)\n",
+                 _feature_buffer.featureCount, SELECTED_FEATURE_COUNT);
+
+    // Feature name lookup using selected indices
+    static const char* FULL_FEATURE_SECTIONS[] = {
+        //0-9
+        "g1n", "g1n", "g1n", "g1n", "g1n", "g1n", "g1n", "g1n", "g1n", "g1n",
+        //10-19
+        "g2n", "g2n", "g2n", "g2n", "g2n", "g2n", "g2n", "g2n", "g2n", "g2n",
+        //20-20
+        "cross", "cross", "cross", "cross", "cross", "cross", "cross", "cross", "cross", "cross",
+        //30-39
+        "diff", "diff", "diff", "diff", "diff", "diff", "diff", "diff", "diff", "diff",
+        //40-48
+        "g1d", "g1d", "g1d", "g1d", "g1d", "g1d", "g1d", "g1d", "g1d",
+        //49-57
+        "g2d", "g2d", "g2d", "g2d", "g2d", "g2d", "g2d", "g2d", "g2d",
+        //58-72
+        "slope1", "slope2", "curv1", "curv2","auc1", "auc2", "peak1", "peak2","range1", "range2", "le_r1", "le_r2","cr_mean", "cr_slope", "cr_var"
     };
-    
-    for(int i = 0; i < _feature_buffer.featureCount && i < TOTAL_ML_FEATURES; i++){
-        const char* section = "unknown";
-        if(i < 10) section = "gas1_norm";
-        else if(i < 20) section = "gas2_norm";
-        else if(i < 30) section = "gas_cross";
-        else if(i == 30) section = "slope1";
-        else if(i == 31) section = "slope2";
-        else if(i == 32) section = "curve1";
-        else if(i == 33) section = "curve2";
-        else if(i == 34) section = "d_temp";
-        else if(i == 35) section = "d_hum";
-        else if(i == 36) section = "d_pres";
-        
-        DEBUG_PRINTF("  [%2d] %-10s = %8.4f (z-score)\n", 
-            i, section, _feature_buffer.features[i]);
-        
+
+    for(int i = 0; i < _feature_buffer.featureCount && i < SELECTED_FEATURE_COUNT; i++){
+        int oIdx = SELECTED_INDICES[i];
+        const char* section = (oIdx < ORIGINAL_FEATURE_COUNT)?FULL_FEATURE_SECTIONS[oIdx] : "???";
+
+        DEBUG_PRINTF("[%2d] orig[%2d] %-8s = %8.4f",i, oIdx,section, _feature_buffer.features[i]);
+
         if(fabsf(_feature_buffer.features[i]) > 3.0f){
-            DEBUG_PRINTF("  ^^^ WARNING: %.1f sigma from training mean\n", 
-                _feature_buffer.features[i]);
+            DEBUG_PRINTF("!! %.1f sigma", _feature_buffer.features[i]);
         }
+        DEBUG_PRINTLN();
     }
 }

@@ -1,6 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 #include <Arduino.h>
+#include "model headers/feature_select.h"
 
 //===========================================================================================================
 //sources
@@ -111,7 +112,9 @@ typedef enum{
 //total features
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
 #define ML_DELTA_FEATURES 4 //delta_temp, delta_hum, delta_pres, log_gas_cross
-#define TOTAL_ML_FEATURES 37
+#define TOTAL_ML_FEATURES SELECTED_FEATURE_COUNT //defined in feature_select.h
+#define FULL_ML_FEATURES 73
+
 //tea classification labels
 typedef enum {
     SCENT_CLASS_DECAF_TEA,
