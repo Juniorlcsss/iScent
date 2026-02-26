@@ -121,9 +121,6 @@ EI_IMPULSE_ERROR run_nn_inference_image_quantized(
 
     size_t output_size = nn_out_len;
 
-    result->_raw_outputs[learn_block_index].matrix = new matrix_t(1, output_size);
-    result->_raw_outputs[learn_block_index].blockId = block_config->block_id;
-
     switch (graph_config->quant_type) {
         case kTfLiteFloat32: {
             result->_raw_outputs[learn_block_index].matrix = new matrix_t(1, output_size);
@@ -256,8 +253,8 @@ EI_IMPULSE_ERROR run_nn_inference(
             }
             break;
             case kTfLiteUInt8: {
-                result->_raw_outputs[learn_block_index].matrix_u8 = new matrix_u8_t(1, output_size);
-                memcpy(result->_raw_outputs[learn_block_index].matrix_u8->buffer, (uint8_t *)nn_out, output_size * sizeof(uint8_t));
+                result->_raw_outputs[learn_block_index + output_ix].matrix_u8 = new matrix_u8_t(1, output_size);
+                memcpy(result->_raw_outputs[learn_block_index + output_ix].matrix_u8->buffer, (uint8_t *)nn_out, output_size * sizeof(uint8_t));
             }
             break;
             default: {
@@ -266,7 +263,7 @@ EI_IMPULSE_ERROR run_nn_inference(
             }
         }
 
-        result->_raw_outputs[learn_block_index].blockId = block_config->block_id;
+        result->_raw_outputs[learn_block_index + output_ix].blockId = block_config->block_id + output_ix;
     }
 
     return EI_IMPULSE_OK;

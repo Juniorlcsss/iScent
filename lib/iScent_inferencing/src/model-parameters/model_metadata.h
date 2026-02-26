@@ -87,22 +87,22 @@
 #define EI_CLASSIFIER_PROJECT_ID                 790620
 #define EI_CLASSIFIER_PROJECT_OWNER              "jmr00004"
 #define EI_CLASSIFIER_PROJECT_NAME               "iScent"
-#define EI_CLASSIFIER_PROJECT_DEPLOY_VERSION     1
-#define EI_CLASSIFIER_NN_INPUT_FRAME_SIZE        12
+#define EI_CLASSIFIER_PROJECT_DEPLOY_VERSION     2
+#define EI_CLASSIFIER_NN_INPUT_FRAME_SIZE        26
 #define EI_CLASSIFIER_RAW_SAMPLE_COUNT           1
-#define EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME      12
+#define EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME      26
 #define EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE       (EI_CLASSIFIER_RAW_SAMPLE_COUNT * EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME)
 #define EI_CLASSIFIER_INPUT_WIDTH                0
 #define EI_CLASSIFIER_INPUT_HEIGHT               0
 #define EI_CLASSIFIER_RESIZE_MODE                EI_CLASSIFIER_RESIZE_NONE
 #define EI_CLASSIFIER_INPUT_FRAMES               0
 #define EI_CLASSIFIER_INTERVAL_MS                1
-#define EI_CLASSIFIER_NN_OUTPUT_COUNT            12
-#define EI_CLASSIFIER_LABEL_COUNT                12
+#define EI_CLASSIFIER_NN_OUTPUT_COUNT            4
+#define EI_CLASSIFIER_LABEL_COUNT                4
 #define EI_CLASSIFIER_SINGLE_FEATURE_INPUT       1
 #define EI_CLASSIFIER_FREQUENCY                  0
 #define EI_CLASSIFIER_SENSOR                     EI_CLASSIFIER_SENSOR_FUSION
-#define EI_CLASSIFIER_FUSION_AXES_STRING         "temp1 + hum1 + pres1 + gas1_0 + temp2 + hum2 + pres2 + gas2_0 + delta_temp + delta_hum + delta_pres + delta_gas"
+#define EI_CLASSIFIER_FUSION_AXES_STRING         "temp1 + hum1 + pres1 + gas1_0 + gas1_1 + gas1_2 + gas1_3 + gas1_4 + gas1_5 + gas1_6 + gas1_7 + gas1_8 + gas1_9 + temp2 + hum2 + pres2 + gas2_0 + gas2_1 + gas2_2 + gas2_3 + gas2_4 + gas2_5 + gas2_6 + gas2_7 + gas2_8 + gas2_9"
 #define EI_CLASSIFIER_HAS_ANOMALY                EI_ANOMALY_TYPE_UNKNOWN
 
 #define EI_CLASSIFIER_TFLITE_INPUT_DATATYPE      EI_CLASSIFIER_DATATYPE_INT8
@@ -134,7 +134,7 @@
 #define EI_CLASSIFIER_HAS_DATA_NORMALIZATION        1
 #define EI_CLASSIFIER_CALIBRATION_ENABLED           0
 #define EI_CLASSIFIER_OBJECT_TRACKING_ENABLED       0
-#define EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE     2944
+#define EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE     3308
 #define EI_CLASSIFIER_LOAD_IMAGE_SCALING            0
 #define EI_CLASSIFIER_DSP_AXES_INDEX_TYPE           uint8_t
 #define EI_CLASSIFIER_HR_ENABLED                    0
@@ -171,8 +171,8 @@
 #define EI_CLASSIFIER_SLICE_SIZE                 (EI_CLASSIFIER_RAW_SAMPLE_COUNT / EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW)
 
 #define EI_STUDIO_VERSION_MAJOR             1
-#define EI_STUDIO_VERSION_MINOR             82
-#define EI_STUDIO_VERSION_PATCH             21
+#define EI_STUDIO_VERSION_MINOR             86
+#define EI_STUDIO_VERSION_PATCH             6
 
 #if ((EI_CLASSIFIER_INFERENCING_ENGINE == EI_CLASSIFIER_TFLITE) ||      (EI_CLASSIFIER_INFERENCING_ENGINE == EI_CLASSIFIER_DRPAI)) &&      EI_CLASSIFIER_USE_FULL_TFLITE == 1
 
@@ -344,7 +344,11 @@ typedef struct {
     uint16_t implementation_version;
     int axes;
     float scale_axes;
+    int powerline_frequency;
+    float highpass_frequency;
+    float lowpass_frequency;
     float motion_sensitivity;
+    float epoch_length;
 } ei_dsp_config_eeg_t;
 
 typedef struct {
