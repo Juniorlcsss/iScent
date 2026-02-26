@@ -256,10 +256,16 @@ class BaseModelConverter(ABC):
         f.write("#endif\n\n")
 
     def _write_feature_validation(self, f, prefix):
-        f.write("// Compile-time feature count validation\n")
-        f.write(f"#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT != {self.feature_count}\n")
-        f.write(f'  #error "{prefix} model was trained with {self.feature_count} features 'f'but SELECTED_FEATURE_COUNT is different"\n')
-        f.write(f"#endif\n\n")
+        if prefix is "KNN":
+            f.write("// Compile-time feature count validation\n")
+            f.write(f"#if defined(FULL_ML_FEATURES) && FULL_ML_FEATURES != {self.feature_count}\n")
+            f.write(f'  #error "{prefix} model was trained with {self.feature_count} features 'f'but FULL_ML_FEATURES is different"\n')
+            f.write(f"#endif\n\n")
+        else:
+            f.write("// Compile-time feature count validation\n")
+            f.write(f"#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT != {self.feature_count}\n")
+            f.write(f'  #error "{prefix} model was trained with {self.feature_count} features 'f'but SELECTED_FEATURE_COUNT is different"\n')
+            f.write(f"#endif\n\n")
 
 
 #===========================================================================================================
