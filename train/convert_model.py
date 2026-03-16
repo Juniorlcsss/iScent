@@ -35,7 +35,8 @@ CLASS_NAMES = [
     "decaf_tea",
     "decaf_coffee",
     "tea",
-    "coffee"
+    "coffee",
+    "ambient"
 ]
 
 #73

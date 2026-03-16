@@ -426,10 +426,10 @@ bool CSVLoader::load(const std::string& filename) {
         //parse label
         std::string rawLabel = toLower(tokens[labelCol]);
         bool isCalibration = (rawLabel == "calibration" || rawLabel == "baseline");
-        bool isAmbient = (rawLabel == "ambient");
-        scent_class_t label = (isCalibration || isAmbient)? SCENT_CLASS_UNKNOWN : getClassFromName(tokens[labelCol]);
         
-        if(!isCalibration&& !isAmbient&&label==SCENT_CLASS_UNKNOWN) {
+        scent_class_t label = isCalibration ? SCENT_CLASS_UNKNOWN : getClassFromName(tokens[labelCol]);
+        
+        if(!isCalibration && label==SCENT_CLASS_UNKNOWN) {
             skipped++; continue;
         }
         
@@ -497,12 +497,21 @@ bool CSVLoader::load(const std::string& filename) {
             continue; 
         }
         
-        if(isCalibration || isAmbient){
+        if(isCalibration){
             calibrationRows.push_back(raw);
             baselineReady = false;
             continue;
+        } else if (!baselineReady && label == SCENT_CLASS_AMBIENT) {
+            calibrationRows.push_back(raw);
+            if (calibrationRows.size() < 10) {
+                continue; //wait
+            } else {
+                baseline = computeBaseline(calibrationRows);
+                baselineReady = true;
+                //dont clear
+            }
         }
-        
+
         if(!baselineReady){
             if(calibrationRows.empty()){ 
                 skipped++; 

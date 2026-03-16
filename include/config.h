@@ -121,6 +121,7 @@ typedef enum {
     SCENT_CLASS_DECAF_COFFEE,
     SCENT_CLASS_TEA,
     SCENT_CLASS_COFFEE,
+    SCENT_CLASS_AMBIENT,
     SCENT_CLASS_COUNT,
     SCENT_CLASS_UNKNOWN = 255
 } scent_class_t;
@@ -129,7 +130,8 @@ static const char* SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
     "decaf tea",
     "decaf coffee",
     "tea",
-    "coffee"
+    "coffee",
+    "ambient"
 };
 typedef enum{
     INFERENCE_MODE_SINGLE= 0,

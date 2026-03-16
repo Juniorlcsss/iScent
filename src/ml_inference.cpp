@@ -458,7 +458,23 @@ bool MLInference::runInference(ml_prediction_t &pred){
 #if EI_CLASSIFIER_HAS_ANOMALY
             pred.anomalyScore = ei_result.anomaly;
             pred.isAnomalous = (ei_result.anomaly > _anomaly_threshold);
+            if (pred.isAnomalous) {
+                pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                pred.confidence = 0.0f; //force unknown
+                memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+            }
+#else
+            pred.isAnomalous = false;
+            pred.anomalyScore = 0.0f;
 #endif
+
+            //threshold check globally
+            if(pred.confidence < _confidence_threshold && pred.predictedClass != SCENT_CLASS_UNKNOWN){
+                pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                pred.confidence = 0.0f;
+                memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
+            }
+
             pred.valid = true;
 #else
             DEBUG_PRINTLN(F("[MLInference] Edge Impulse model not available"));
@@ -483,9 +499,10 @@ bool MLInference::runInference(ml_prediction_t &pred){
             }
             if(pred.confidence < _confidence_threshold){
                 pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                pred.confidence = 0.0f;
                 memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
                 pred.isAnomalous = true;
-                pred.anomalyScore = 1.0f - pred.confidence;
+                pred.anomalyScore = 1.0f - confidence;
             } else {
                 pred.isAnomalous = false;
                 pred.anomalyScore = 0.0f;
@@ -497,6 +514,19 @@ bool MLInference::runInference(ml_prediction_t &pred){
         case ML_MODEL_KNN: {
             float confidence = 0.0f;
             uint8_t cls = knn_predict_with_confidence(_feature_buffer.features, &confidence);
+            
+            //distance based anomaly for KNN
+            knn_neighbor_t neighbors[KNN_K];
+            knn_find_neighbors(_feature_buffer.features, neighbors);
+            float avg_distance = 0.0f;
+            for (int i = 0; i < KNN_K; i++) {
+                avg_distance += neighbors[i].distance;
+            }
+            avg_distance /= KNN_K;
+
+            //distance > 5.0 in norm = anomaly
+            float calculated_anomaly = fmin(avg_distance / 5.0f, 1.0f);
+            
             pred.inferenceTimeMs = (micros() - start_time) / 1000;
             pred.predictedClass = (scent_class_t)cls;
             pred.confidence = confidence;
@@ -504,14 +534,17 @@ bool MLInference::runInference(ml_prediction_t &pred){
             if(pred.predictedClass < ML_CLASS_COUNT){
                 pred.classConfidences[pred.predictedClass] = confidence;
             }
-            if(pred.confidence < _confidence_threshold){
+            
+            pred.anomalyScore = calculated_anomaly;
+            pred.isAnomalous = (calculated_anomaly > _anomaly_threshold);
+            
+            if(pred.confidence < _confidence_threshold || pred.isAnomalous){
                 pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                pred.confidence = 0.0f;
                 memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
-                pred.isAnomalous = true;
-                pred.anomalyScore = 1.0f - pred.confidence;
-            } else {
-                pred.isAnomalous = false;
-                pred.anomalyScore = 0.0f;
+                if (!pred.isAnomalous) {
+                    pred.anomalyScore = 1.0f - pred.confidence;
+                }
             }
             pred.valid = true;
             break;
@@ -529,9 +562,10 @@ bool MLInference::runInference(ml_prediction_t &pred){
             }
             if(pred.confidence < _confidence_threshold){
                 pred.predictedClass = SCENT_CLASS_UNKNOWN;
+                pred.confidence = 0.0f;
                 memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
                 pred.isAnomalous = true;
-                pred.anomalyScore = 1.0f - pred.confidence;
+                pred.anomalyScore = 1.0f - confidence;
             } else {
                 pred.isAnomalous = false;
                 pred.anomalyScore = 0.0f;
