@@ -839,7 +839,12 @@ void handleButtons(){
     //prediction screen nav
     if(display.getMode() == DISPLAY_MODE_PREDICTION){
         if(buttons.wasPressed(BUTTON_DOWN)){
-            predictionSelection = (predictionSelection + 1) % 3;
+            if(ml.getInferenceMode() != INFERENCE_MODE_SINGLE){
+                predictionSelection = (predictionSelection == 0) ? 2 : 0;
+            }
+            else{
+                predictionSelection = (predictionSelection + 1) % 3;
+            }
             display.setPredictionSelection(predictionSelection);
             updateDisplay();
             return;
@@ -851,7 +856,8 @@ void handleButtons(){
                     currentPrediction.valid = false;
                     currentPrediction.confidence = 0.0f;
                     currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
-                    display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
+                    const char* dispName = (ml.getInferenceMode() != INFERENCE_MODE_SINGLE) ? "Ensemble" : ml.getActiveModelName();
+                    display.showPredictionScreen(currentPrediction, currentSensorData, dispName);
                     display.refresh();
                     logger.setActiveLabel(LOG_LABEL_PRED);
 
@@ -865,17 +871,20 @@ void handleButtons(){
                     break;
                 }
                 case 1:{
-                    //cycle
-                    if(ml.getInferenceMode()==INFERENCE_MODE_SINGLE){
-                        ml.nextModel();
+                    //only cycling models if not in ensemble
+                    if(ml.getInferenceMode() != INFERENCE_MODE_ENSEMBLE){
+                        if(ml.getInferenceMode()==INFERENCE_MODE_SINGLE){
+                            ml.nextModel();
+                        }
+                        else{
+                            ml.cycleInferenceMode();
+                            snprintf(settingsLabelInfMode, sizeof(settingsLabelInfMode), "Infer: %s", ml.getInferenceModeName());
+                        }
+                        currentPrediction.valid=false;
+                        const char* dispName = (ml.getInferenceMode() != INFERENCE_MODE_SINGLE) ? "Ensemble" : ml.getActiveModelName();
+                        display.showPredictionScreen(currentPrediction, currentSensorData, dispName);
+                        display.refresh();
                     }
-                    else{
-                        ml.cycleInferenceMode();
-                        snprintf(settingsLabelInfMode, sizeof(settingsLabelInfMode), "Infer: %s", ml.getInferenceModeName());
-                    }
-                    currentPrediction.valid=false;
-                    display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
-                    display.refresh();
                     break;
                 }
                 default:
@@ -1041,10 +1050,12 @@ void updateDisplay(){
             if(currentState==STATE_TEMPORAL_COLLECTING){
                 //show live progress
                 char buffer[32];
-                snprintf(buffer, sizeof(buffer), "Collecting %d/%d...",ml.getTemporalCount(), ml.getTemporalBufferSize());display.showPredictionScreen(currentPrediction, currentSensorData, buffer);
+                snprintf(buffer, sizeof(buffer), "Collecting %d/%d...",ml.getTemporalCount(),ml.getTemporalBufferSize());
+                display.showPredictionScreen(currentPrediction, currentSensorData, buffer);
             }
             else{
-                display.showPredictionScreen(currentPrediction, currentSensorData, ml.getActiveModelName());
+                const char* dispName=(ml.getInferenceMode()!=INFERENCE_MODE_SINGLE) ? "Ensemble":ml.getActiveModelName();
+                display.showPredictionScreen(currentPrediction, currentSensorData, dispName);
             }
             break;
 

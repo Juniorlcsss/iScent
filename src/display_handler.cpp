@@ -305,24 +305,34 @@ void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dua
     }
 
     //actions
-    _dsp->setCursor(0,38);
-    _dsp->print(_predictionSelection == 0 ? ">Rerun" : " Rerun");
-
-    char modelBuf[18];
-    if(modelName == nullptr){
-        strncpy(modelBuf, "Unknown", sizeof(modelBuf) - 1);
-        modelBuf[sizeof(modelBuf) - 1] = '\0';
-    } else {
-        strncpy(modelBuf, modelName, sizeof(modelBuf) - 1);
-        modelBuf[sizeof(modelBuf) - 1] = '\0';
+    if(strcmp(modelName, "Ensemble") == 0){
+        _dsp->setCursor(0,40);
+        _dsp->print(_predictionSelection == 0 ? ">Rerun" : " Rerun");
+        
+        _dsp->setCursor(0,50);
+        _dsp->print(_predictionSelection == 2 ? ">Back" : " Back");
     }
+    else{
+        _dsp->setCursor(0,38);
+        _dsp->print(_predictionSelection == 0 ? ">Rerun" : " Rerun");
 
-    _dsp->setCursor(0,48);
-    _dsp->print(_predictionSelection == 1 ? ">Model: " : " Model: ");
-    _dsp->print(modelBuf);
+        char modelBuf[18];
+        if(modelName == nullptr){
+            strncpy(modelBuf, "Unknown", sizeof(modelBuf) - 1);
+            modelBuf[sizeof(modelBuf) - 1] = '\0';
+        }
+        else{
+            strncpy(modelBuf, modelName, sizeof(modelBuf) - 1);
+            modelBuf[sizeof(modelBuf) - 1] = '\0';
+        }
 
-    _dsp->setCursor(0,56);
-    _dsp->print(_predictionSelection == 2 ? ">Back" : " Back");
+        _dsp->setCursor(0,48);
+        _dsp->print(_predictionSelection == 1 ? ">Model: " : " Model: ");
+        _dsp->print(modelBuf);
+
+        _dsp->setCursor(0,56);
+        _dsp->print(_predictionSelection == 2 ? ">Back" : " Back");
+    }
 
     refresh();
 

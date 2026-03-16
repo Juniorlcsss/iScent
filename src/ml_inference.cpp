@@ -1111,8 +1111,32 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
     //knn
     uint8_t knnCls = knn_predict_with_confidence(_feature_buffer.features, &knnConf);
 
+    knn_neighbor_t neighbors[KNN_K];
+    knn_find_neighbors(_feature_buffer.features, neighbors);
+    float avg_distance = 0.0f;
+    for(int i = 0; i < KNN_K; i++){
+        avg_distance += neighbors[i].distance;
+    }
+    avg_distance /= KNN_K;
+    float calculated_anomaly = fmin(avg_distance / 5.0f, 1.0f);
+    bool knnIsAnomalous = (calculated_anomaly > _anomaly_threshold);
+
     //rf
     uint8_t rfCls = rf_predict_with_confidence(_feature_buffer.features, &rfConf);
+
+    //force thresholds
+    if(dtConf < _confidence_threshold){
+        dtCls =SCENT_CLASS_UNKNOWN;
+        dtConf=0.0f;
+    }
+    if(knnConf < _confidence_threshold || knnIsAnomalous){
+        knnCls =SCENT_CLASS_UNKNOWN;
+        knnConf=0.0f;
+    }
+    if(rfConf < _confidence_threshold){
+        rfCls =SCENT_CLASS_UNKNOWN;
+        rfConf=0.0f;
+    }
 
     pred.inferenceTimeMs = (micros() - start) / 1000;
 
@@ -1151,8 +1175,22 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
 
         }
     }
-    pred.predictedClass=(scent_class_t)bClass;
-    pred.confidence = (total>0) ? (bScore / total) : 0.0f;
+
+    //disagreement check
+    bool dt_knn_agree = (dtCls == knnCls);
+    bool knn_rf_agree = (knnCls == rfCls);
+    bool dt_rf_agree = (dtCls == rfCls);
+
+    //is no two models:
+    if(!dt_knn_agree && !knn_rf_agree && !dt_rf_agree){
+        pred.predictedClass = SCENT_CLASS_UNKNOWN;
+        pred.confidence = 0.0f;
+    }
+    else{
+        pred.predictedClass=(scent_class_t)bClass;
+        pred.confidence = (total>0) ? (bScore / total) : 0.0f;
+    }
+
     pred.valid=true;
 
     _total_inferences++;

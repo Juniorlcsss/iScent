@@ -142,8 +142,8 @@ typedef enum{
 
 static const char* INFERENCE_MODE_NAMES[] ={
     "Single",
-    "Temporal",
-    "Ensemble"
+    "Ensemble",
+    "Temporal"
 };
 
 #define TEMPOERAL_COLLECTION_INTERVAL_MS 200
