@@ -96,7 +96,7 @@ typedef enum{
 //machine learning config
 //===========================================================================================================
 //paraeters for edge
-#define ML_CONFIDENCE_THRESHOLD 0.60f
+#define ML_CONFIDENCE_THRESHOLD 0.30f
 #define ML_INFERENCE_INTERVAL_MS 2000
 #define ML_ANOMALY_THRESHOLD 0.30f
 #define ML_SAMPLES 10
@@ -113,23 +113,23 @@ typedef enum{
 #define ML_RAW_FEATURES (ML_HEATER_STEPS * ML_FEATURE_COUNT) //per sensor
 #define ML_DELTA_FEATURES 4 //delta_temp, delta_hum, delta_pres, log_gas_cross
 #define TOTAL_ML_FEATURES SELECTED_FEATURE_COUNT //defined in feature_select.h
-#define FULL_ML_FEATURES 73
+#define FULL_ML_FEATURES 82
 
 //tea classification labels
 typedef enum {
-    SCENT_CLASS_DECAF_TEA,
-    SCENT_CLASS_DECAF_COFFEE,
-    SCENT_CLASS_TEA,
-    SCENT_CLASS_COFFEE,
-    SCENT_CLASS_AMBIENT,
-    SCENT_CLASS_COUNT,
+    SCENT_CLASS_DECAF_TEA = 0,
+    SCENT_CLASS_TEA=1,
+    SCENT_CLASS_DECAF_COFFEE =2,
+    SCENT_CLASS_COFFEE=3,
+    SCENT_CLASS_AMBIENT=4,
+    SCENT_CLASS_COUNT=5,
     SCENT_CLASS_UNKNOWN = 255
 } scent_class_t;
 
 static const char* SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
     "decaf tea",
-    "decaf coffee",
     "tea",
+    "decaf coffee",
     "coffee",
     "ambient"
 };
