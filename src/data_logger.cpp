@@ -1,7 +1,8 @@
 #include "data_logger.h"
 #include <ctype.h>
 
-static const char LOG_HEADER[] = "timestamp,label,temp1,hum1,pres1,delta_temp,delta_hum,delta_pres,delta_gas,pred_class,pred_conf,anomaly_score,iaq";
+static const char LOG_HEADER[] =
+"timestamp,label,temp1,hum1,pres1,gas1_0,gas1_1,gas1_2,gas1_3,gas1_4,gas1_5,gas1_6,gas1_7,gas1_8,gas1_9,temp2,hum2,pres2,gas2_0,gas2_1,gas2_2,gas2_3,gas2_4,gas2_5,gas2_6,gas2_7,gas2_8,gas2_9,delta_temp,delta_hum,delta_pres,delta_gas,pred_class,pred_conf,anomaly_score,iaq";
 
 static const char CALIB_DEBUG_FILE[] = "/calib_debug.txt";
 static const uint32_t CALIB_DEBUG_MIN_INTERVAL_MS = 500;
@@ -212,6 +213,8 @@ bool DataLogger::startLogging(const char *filename){
         DEBUG_PRINTF("[DataLogger] startLogging failed creating %s on %s\n", _current_filename.c_str(), _using_sd ? "SD" : "LittleFS");
         return false;
     }
+    
+    _is_logging = true;
     DEBUG_PRINTF("[DataLogger] startLogging target=%s fs=%s ok=%d\n", _current_filename.c_str(), _using_sd ? "SD" : "LittleFS", ok);
     return ok;
 }
@@ -350,6 +353,20 @@ bool DataLogger::flushCalibDebug(){
     _calib_debug_active = false;
     _calib_debug_count = 0;
     return true;
+}
+
+void DataLogger::logDebugMsg(const String &msg){
+    if(!_init){
+        return;
+    }
+
+    String path = normalisePath("/system_debug.txt");
+    File f = _using_sd ? SD.open(toFsPath(path).c_str(), FILE_WRITE) : LittleFS.open(path, "a");
+    if(f){
+        f.println(msg);
+        f.flush();
+        f.close();
+    }
 }
 
 //===========================================================================================================
@@ -560,6 +577,9 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     }
     else if(entry.label == LOG_LABEL_AMBIENT){
         _log_file.print("ambient,");
+    }
+    else if(entry.label == LOG_LABEL_PRED){
+        _log_file.print("prediction,");
     }
     else if(entry.label >= 0 && entry.label < SCENT_CLASS_COUNT){
         _log_file.printf("%s,", SCENT_CLASS_NAMES[entry.label]);

@@ -270,7 +270,7 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
 
 }
 
-void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dual_sensor_data_t &data, const char* modelName){
+void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dual_sensor_data_t &data, const char* modelName, bool isAccumulating){
     if(!_ready) return;
 
     clear();
@@ -280,27 +280,61 @@ void DisplayHandler::showPredictionScreen(const ml_prediction_t &pred, const dua
 
     //prediction
     _dsp->setCursor(0,14);
-    _dsp->print(F("Pred: "));
-    if(pred.valid && pred.predictedClass < SCENT_CLASS_COUNT){
-        const char* name = SCENT_CLASS_NAMES[pred.predictedClass];
-        char label[18];
-        strncpy(label, name, sizeof(label)-1);
-        label[sizeof(label)-1] = '\0';
-        _dsp->print(label);
-    } else if(pred.valid){
-        _dsp->print("Unknown");
-    } else {
-        _dsp->print("Analysing...");
+    
+    bool hasHighConfPred = pred.valid && (pred.predictedClass < SCENT_CLASS_COUNT);
+    
+    if (isAccumulating){
+
+        if(hasHighConfPred){
+            _dsp->print(F("Curr Pred: "));
+            const char* name = SCENT_CLASS_NAMES[pred.predictedClass];
+            char label[18];
+            strncpy(label, name, sizeof(label)-1);
+            label[sizeof(label)-1] = '\0';
+            _dsp->print(label);
+        }
+        else{
+            _dsp->print(F("Analysing..."));
+        }
+        
+    }
+
+    else{
+
+        _dsp->print(F("Pred: "));
+
+        if(hasHighConfPred){
+            const char* name = SCENT_CLASS_NAMES[pred.predictedClass];
+            char label[18];
+            strncpy(label, name, sizeof(label)-1);
+            label[sizeof(label)-1] = '\0';
+            _dsp->print(label);
+        }
+
+        else if(pred.valid){
+            _dsp->print("Unknown");
+        }
+
+        else{
+            _dsp->print("Analysing...");
+        }
     }
 
     //confidence
     _dsp->setCursor(0,26);
-    if(pred.valid){
+
+    if(pred.valid && (!isAccumulating || hasHighConfPred)){
         _dsp->printf("Conf: %.1f%%", pred.confidence * 100.0f);
         if(pred.isAnomalous){
-            _dsp->print("An!");
+            _dsp->print(" An!");
         }
-    } else {
+    }
+
+    else if(isAccumulating){
+        _dsp->print("Gathering Air...");
+    }
+
+    else{
         _dsp->print("Conf: ---%");
     }
 
