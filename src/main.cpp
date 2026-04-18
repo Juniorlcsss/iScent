@@ -853,11 +853,12 @@ void handleButtons(){
         if(buttons.wasPressed(BUTTON_SELECT) || buttons.wasLongPressed(BUTTON_SELECT)){
             switch(predictionSelection){
                 case 0:{
+                    ml.clearFeatureBuffer();
                     currentPrediction.valid = false;
                     currentPrediction.confidence = 0.0f;
                     currentPrediction.predictedClass = SCENT_CLASS_UNKNOWN;
                     const char* dispName = (ml.getInferenceMode() != INFERENCE_MODE_SINGLE) ? "Ensemble" : ml.getActiveModelName();
-                    display.showPredictionScreen(currentPrediction, currentSensorData, dispName);
+                    display.showPredictionScreen(currentPrediction,currentSensorData, dispName, ml.isAccumulating());
                     display.refresh();
                     logger.setActiveLabel(LOG_LABEL_PRED);
 
@@ -865,6 +866,7 @@ void handleButtons(){
                         performTemporalEnsembleInference();
                     }
                     else{
+                        // Because buffer is cleared, this will correctly fail and just return to Idle/Sampling loop
                         ml.runActiveInference(currentPrediction);
                         updateDisplay();
                     }
@@ -882,7 +884,7 @@ void handleButtons(){
                         }
                         currentPrediction.valid=false;
                         const char* dispName = (ml.getInferenceMode() != INFERENCE_MODE_SINGLE) ? "Ensemble" : ml.getActiveModelName();
-                        display.showPredictionScreen(currentPrediction, currentSensorData, dispName);
+                        display.showPredictionScreen(currentPrediction, currentSensorData, dispName, ml.isAccumulating());
                         display.refresh();
                     }
                     break;
@@ -1055,7 +1057,7 @@ void updateDisplay(){
             }
             else{
                 const char* dispName=(ml.getInferenceMode()!=INFERENCE_MODE_SINGLE) ? "Ensemble":ml.getActiveModelName();
-                display.showPredictionScreen(currentPrediction, currentSensorData, dispName);
+                display.showPredictionScreen(currentPrediction, currentSensorData, dispName, ml.isAccumulating());
             }
             break;
 
