@@ -156,7 +156,7 @@ const ei_impulse_t impulse_790620_6 = {
     .project_name = "iScent",
     .impulse_id = 6,
     .impulse_name = "Impulse #6",
-    .deploy_version = 3,
+    .deploy_version = 4,
 
     .nn_input_frame_size = 24,
     .raw_sample_count = 1,
