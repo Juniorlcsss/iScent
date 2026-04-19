@@ -254,9 +254,20 @@ static void applyMultiStepTransform(csv_training_sample_t& sample,const RawSenso
     sample.features[idx++] = fabsf(raw.hum1 - raw.hum2);
     sample.features[idx++] = fabsf(raw.pres1 - raw.pres2);
 #endif
-    
-    if (idx != CSV_FEATURE_COUNT) {
-        std::cerr << "Feature count mismatch: expected " << CSV_FEATURE_COUNT  << " but got " << idx << std::endl;
+
+    //[76-81] raw environmental values
+#if USE_ENV_FEATURES
+    sample.features[idx++] = raw.temp1;
+    sample.features[idx++] = raw.hum1;
+    sample.features[idx++] = raw.pres1;
+    sample.features[idx++] = raw.temp2;
+    sample.features[idx++] = raw.hum2;
+    sample.features[idx++] = raw.pres2;
+#endif
+
+    if(idx!=BASE_FEATURE_COUNT){
+        std::cerr<< "Feature count mismatch: expected "<< BASE_FEATURE_COUNT << " but got " << idx << std::endl;
+        return;
     }
 }
 
@@ -513,14 +524,16 @@ bool CSVLoader::load(const std::string& filename) {
         }
 
         if(!baselineReady){
-            if(calibrationRows.empty()){ 
-                skipped++; 
-                continue; 
-            }
+            baseline.temp1=20.0f; baseline.temp2=20.0f;
+            baseline.hum1=40.0f; baseline.hum2=40.0f;
+            baseline.pres1=1000.0f; baseline.pres2=1000.0f;
 
-            baseline = computeBaseline(calibrationRows);
-            calibrationRows.clear();
-            baselineReady = true;
+            for(int i=0;i<NUM_HEATER_STEPS;i++){
+                baseline.gas1_steps[i]=1.0f;
+                baseline.gas2_steps[i]=1.0f;
+            }
+            baselineReady =true;
+            std::cout << "Warning: No ambient/calibration rows found, using neutral baseline 1.0.\n";
         }
         
         csv_training_sample_t sample{};
@@ -656,5 +669,11 @@ void CSVLoader::printFeatureNames(){
     std::cout << "  [" << idx++ << "] delta_temp" << std::endl;
     std::cout << "  [" << idx++ << "] delta_hum" << std::endl;
     std::cout << "  [" << idx++ << "] delta_pres" << std::endl;
+    std::cout << "  [" << idx++ << "] temp1" << std::endl;
+    std::cout << "  [" << idx++ << "] hum1" << std::endl;
+    std::cout << "  [" << idx++ << "] pres1" << std::endl;
+    std::cout << "  [" << idx++ << "] temp2" << std::endl;
+    std::cout << "  [" << idx++ << "] hum2" << std::endl;
+    std::cout << "  [" << idx++ << "] pres2" << std::endl;
 #endif
 }

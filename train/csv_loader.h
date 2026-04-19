@@ -8,28 +8,26 @@
 
 
 #define NUM_HEATER_STEPS 10
-#define USE_ENV_FEATURES false
-#if USE_ENV_FEATURES
-    #define CSV_FEATURE_COUNT 76
-#else
-    #define CSV_FEATURE_COUNT 73
-#endif
+#define BASE_FEATURE_COUNT 82
+#define USE_ENV_FEATURES true
+#define CSV_FEATURE_COUNT 256
+
 
 //scent classes
 typedef enum {
     SCENT_CLASS_DECAF_TEA = 0,
-    SCENT_CLASS_DECAF_COFFEE,
-    SCENT_CLASS_TEA,
-    SCENT_CLASS_COFFEE,
-    SCENT_CLASS_AMBIENT,
-    SCENT_CLASS_COUNT,
+    SCENT_CLASS_TEA=1,
+    SCENT_CLASS_DECAF_COFFEE =2,
+    SCENT_CLASS_COFFEE=3,
+    SCENT_CLASS_AMBIENT=4,
+    SCENT_CLASS_COUNT=5,
     SCENT_CLASS_UNKNOWN = 255
 } scent_class_t;
 
 static const char* CSV_SCENT_CLASS_NAMES[SCENT_CLASS_COUNT] = {
-    "decaf_tea",
-    "decaf_coffee",
+    "decaf tea",
     "tea",
+    "decaf coffee",
     "coffee",
     "ambient"
 };
