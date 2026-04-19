@@ -31,19 +31,12 @@ struct Row {
     float features[FEATURE_COUNT];
 };
 
-static const char* CLASS_NAMES[12] = {
-    "camomile",
-    "thoroughly minted infusion",
-    "berry burst",
-    "darjeeling blend",
-    "decaf nutmeg and vanilla",
-    "earl grey",
-    "english breakfast tea",
-    "fresh orange",
-    "garden selection (lemon)",
-    "green tea",
-    "raspberry",
-    "sweet cherry"
+static const char* CLASS_NAMES[5] = {
+    "decaf tea",
+    "decaf coffee",
+    "tea",
+    "coffee",
+    "ambient"
 };
 
 static const char* shortFeatureName(int idx){
@@ -242,26 +235,21 @@ static std::string normaliseLabel(const std::string& raw) {
 
 static int labelIndex(const std::string& raw) {
     const std::string norm = normaliseLabel(raw);
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 5; ++i) {
         if (norm == CLASS_NAMES[i]) return i;
     }
-    if(norm.find("camomile") != std::string::npos || norm.find("chamomile") != std::string::npos) return 0;
-    if(norm.find("mint") != std::string::npos) return 1;
-    if(norm.find("berry") != std::string::npos) return 2;
-    if(norm.find("darjeeling") != std::string::npos) return 3;
-    if(norm.find("nutmeg") != std::string::npos || norm.find("vanilla") != std::string::npos || norm.find("decaf") != std::string::npos) return 4;
-    if(norm.find("earl") != std::string::npos) return 5;
-    if(norm.find("breakfast") != std::string::npos) return 6;
-    if(norm.find("orange") != std::string::npos) return 7;
-    if(norm.find("lemon") != std::string::npos || norm.find("garden") != std::string::npos) return 8;
-    if(norm.find("green") != std::string::npos) return 9;
-    if(norm.find("raspberry") != std::string::npos) return 10;
-    if(norm.find("cherry") != std::string::npos) return 11;
+    if(norm.find("decaf tea")!=std::string::npos) return 0;
+    if(norm.find("decaf coffee")!=std::string::npos) return 1;
+    if(norm.find("tea")!=std::string::npos) return 2;
+    if(norm.find("coffee")!=std::string::npos) return 3;
+    if(norm.find("ambient")!=std::string::npos) return 4;
     return -1;
 }
 
 static const char* nameForClass(uint8_t cls) {
-    if (cls<12) return CLASS_NAMES[cls];
+    if (cls<5){
+        return CLASS_NAMES[cls];
+    }
     return "unknown";
 }
 
@@ -642,3 +630,4 @@ int main(int argc, char** argv) {
 
     return 0;
 }
+
