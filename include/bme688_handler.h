@@ -36,6 +36,7 @@ typedef struct {
     float delta_gas_avg;
     uint32_t timestamp;
     bool valid;
+    bool complete;
 } dual_sensor_data_t;
 
 typedef struct {
@@ -45,7 +46,10 @@ typedef struct {
     const char* profile_name;
 } heater_profile_t;
 
+#define CALIBRATION_VERSION 2
+
 typedef struct {
+    uint16_t version;
     float temp_offset_primary;
     float temp_offset_secondary;
     float humidity_offset_primary;
@@ -54,6 +58,8 @@ typedef struct {
     float gas_baseline_secondary[BME688_NUM_HEATER_STEPS];
     float pressure_offset_primary;
     float pressure_offset_secondary;
+    float calib_temp;
+    float calib_hum;
     bool calibrated;
     uint32_t timestamp;
 } sensor_calibration_t;
@@ -154,6 +160,7 @@ public:
     uint16_t getCalibrationCollected() const;
     uint16_t getCalibrationTarget() const;
     bool finishCalibration();
+    void cancelCalibration();
 
 
 //===========================================================================================================
@@ -165,6 +172,9 @@ public:
 
     //get IAQ
     static float calculateIAQ(float gas_resistance, float humidity);
+
+    //relative humidity measured
+    static float convertHumidity(float rh, float rawTemp, float correctedTemp);
 
     //compensation
     static float compensateTemperature(float gas, float temp, float baseline = TEMPERATURE_BASELINE);
@@ -254,8 +264,16 @@ private:
     float _calibration_temp_sum_p, _calibration_temp_sum_s;
     float _calibration_hum_sum_p, _calibration_hum_sum_s;
     float _calibration_pres_sum_p, _calibration_pres_sum_s;
+    uint16_t _calibration_env_count_p, _calibration_env_count_s;
     float _calibration_gas_sum_p[BME688_NUM_HEATER_STEPS];
     float _calibration_gas_sum_s[BME688_NUM_HEATER_STEPS];
+    uint16_t _calibration_gas_count_p[BME688_NUM_HEATER_STEPS];
+    uint16_t _calibration_gas_count_s[BME688_NUM_HEATER_STEPS];
+
+    //heater off die temperature of each sensor
+    float _die_temp_primary;
+    float _die_temp_secondary;
+    bool _drift_warned;
 //===========================================================================================================
 //helpers
 //===========================================================================================================
@@ -269,6 +287,13 @@ private:
     //read
     bool readSensorScan(Bme68x &sensor, sensor_scan_t &data);
     bool readSingleReading(Bme68x &sensor, sensor_data_t &data);
+
+    //dieTemp receives the raw temperature
+    bool readAmbient(Bme68x &sensor, sensor_data_t &data, float tempOffset, float &dieTemp);
+    
+    static void fillAmbient(sensor_scan_t &scan, const sensor_data_t &amb);
+
+    void programSweep(Bme68x &sensor, float dieTemp);
 
     void calculateDeltas(dual_sensor_data_t &data);
     void accumulateCalibrationData(const dual_sensor_data_t &data);

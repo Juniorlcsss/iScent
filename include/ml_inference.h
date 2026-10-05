@@ -38,6 +38,7 @@ typedef struct{
     float anomalyScore;
     bool isAnomalous;
     uint32_t inferenceTimeMs;
+    uint32_t inferenceTimeUs;
     uint32_t timestamp;
     bool valid;
 } ml_prediction_t;
@@ -73,6 +74,10 @@ typedef struct{
     scent_class_t rfClass;
     float rfConf;
     uint32_t inferenceTimeMs;
+    uint32_t inferenceTimeUs;
+    uint32_t dtTimeUs;
+    uint32_t knnTimeUs;
+    uint32_t rfTimeUs;
     uint32_t timestamp;
     bool valid;
 } ml_ensemble_prediction_t;
@@ -143,7 +148,6 @@ public:
 
     uint32_t getTotalInferences() const;
     float getAverageInferenceTimeMs() const;
-    void resetStats();
 
     void printModelInfo();
     void printPrediction(const ml_prediction_t &pred);
@@ -204,7 +208,7 @@ private:
 
     //stats
     uint32_t _total_inferences;
-    uint64_t _total_inference_time_ms;
+    uint64_t _total_inference_time_us;
 
     //model selection
     ml_model_source_t _active_model;

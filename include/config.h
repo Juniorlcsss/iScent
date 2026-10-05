@@ -23,9 +23,6 @@
 //wire 0 
 #define I2C_SDA_PIN 4
 #define I2C_SCL_PIN 5
-//wire 1
-#define I2C1_SDA_PIN 6
-#define I2C1_SCL_PIN 7
 
 //BME688 I2C addresses
 #define BME688_PRIMARY_ADDR 0x76
@@ -61,15 +58,17 @@
 #define BME688_NUM_HEATER_STEPS 10
 #define BME688_HEATER_DURATION 100 //ms
 
-//heater profile defaults tuned for tea VOC range (higher temps 360–400C)
-static const uint16_t DEFAULT_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {200, 250, 280, 310, 340, 360, 380, 400, 430, 450};
+#define BME688_MAX_HEATER_TEMP 400
+
+//heater profile defaults
+static const uint16_t DEFAULT_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {200, 230, 260, 290, 320, 340, 360, 375, 390, 400};
 static const uint16_t DEFAULT_HEATER_DURATIONS[BME688_NUM_HEATER_STEPS] = {150, 150, 140, 130, 120, 110, 100, 100, 100, 100};
 
-static const uint16_t VOC_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {330, 340, 350, 360, 370, 380, 390, 395, 400, 400};
-static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {320, 340, 360, 380, 400, 420, 440, 460, 480, 480};
+static const uint16_t VOC_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {330, 340, 350, 360, 370, 380, 385, 390, 395, 400};
+static const uint16_t FOOD_HEATER_TEMPERATURES[BME688_NUM_HEATER_STEPS] = {310, 320, 330, 340, 350, 360, 370, 380, 390, 400};
 
 //sampling config
-#define BME688_SAMPLE_RATE 3000
+#define BME688_SAMPLE_RATE 6500
 #define BME688_GAS_BASE_SAMPLES 30
 #define BME688_WARMUP_SAMPLES 10
 #define BME688_STABLE_MS 300000   //5 minutes
@@ -87,9 +86,17 @@ typedef enum{
 #define HUMIDITY_BASELINE 40.0f     //fallback default
 #define TEMPERATURE_BASELINE 24.0f  //fallback default
 
-#define APPLY_TEMP_HUM_CALIBRATION false
-#define STATIC_TEMP_CORRECTION_C -5.0f
-#define STATIC_HUM_CORRECTION_PCT 0.0f
+#define BME688_TEMP_OFFSET_PRIMARY_C 7.5f
+#define BME688_TEMP_OFFSET_SECONDARY_C 7.5f
+
+#define BME688_AMBIENT_OS_TEMP BME68X_OS_8X
+#define BME688_AMBIENT_OS_PRES BME68X_OS_4X
+#define BME688_AMBIENT_OS_HUM BME68X_OS_8X
+#define BME688_SWEEP_OS_TEMP BME68X_OS_1X
+#define BME688_SWEEP_OS_PRES BME68X_OS_1X
+#define BME688_SWEEP_OS_HUM BME68X_OS_1X
+
+#define CALIB_TEMP_DRIFT_WARN_C 5.0f
 
 
 //===========================================================================================================
@@ -99,7 +106,7 @@ typedef enum{
 #define ML_CONFIDENCE_THRESHOLD 0.30f
 #define ML_INFERENCE_INTERVAL_MS 2000
 #define ML_ANOMALY_THRESHOLD 0.30f
-#define ML_SAMPLES 10
+#define ML_SAMPLES 1
 
 //feature extraction perams
 #define ML_WINDOW_SIZE 30

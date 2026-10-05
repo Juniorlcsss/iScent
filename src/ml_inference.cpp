@@ -44,8 +44,22 @@ extern DataLogger logger;
 #include "model headers/rf_model_header.h"
 #endif
 
-#include "ensemble_weights.h"
+#include "model headers/ensemble_weights.h"
 #include "model headers/anomaly_threshold.h"
+#if __has_include("model headers/ambient_gate.h")
+#include "model headers/ambient_gate.h"
+#endif
+#ifndef AMBIENT_GATE_SCORE
+    #define AMBIENT_GATE_SCORE 0.85f
+#endif
+
+
+#ifndef ISC_EI_USES_PIPELINE_FEATURES
+    #define ISC_EI_USES_PIPELINE_FEATURES 0
+#endif
+#if ISC_ENABLE_EI && ISC_EI_USES_PIPELINE_FEATURES && (EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE > TOTAL_ML_FEATURES)
+  #error "Edge Impulse model expects more inputs than the exported feature vector (SELECTED_FEATURE_COUNT)"
+#endif
 
 
 
@@ -79,7 +93,7 @@ MLInference::MLInference():
     _data_collection_mode(false),
     _current_label(SCENT_CLASS_UNKNOWN),
     _total_inferences(0),
-    _total_inference_time_ms(0),
+    _total_inference_time_us(0),
     _active_model(ML_MODEL_EDGE_IMPULSE),
     _model_names{"Edge Impulse", "Decision Tree", "KNN", "Random Forest"},
     _training_samples(nullptr),
@@ -135,7 +149,8 @@ bool MLInference::begin(){
     DEBUG_PRINTF("[MLInference] Pipeline: %d base -> engineered -> selected %d/%d (robust scaled)\n",
                  FULL_ML_FEATURES, SELECTED_FEATURE_COUNT, ORIGINAL_FEATURE_COUNT);
 
-    _model_available[ML_MODEL_EDGE_IMPULSE] = (ISC_ENABLE_EI != 0);
+    //a model trained on raw inputs would receive pipeline features, so it stays off until retrained
+    _model_available[ML_MODEL_EDGE_IMPULSE] = (ISC_ENABLE_EI != 0) && (ISC_EI_USES_PIPELINE_FEATURES != 0);
     _model_available[ML_MODEL_DECISION_TREE] = (ISC_ENABLE_DT != 0);
     _model_available[ML_MODEL_KNN] = (ISC_ENABLE_KNN != 0);
     _model_available[ML_MODEL_RANDOM_FOREST] = (ISC_ENABLE_RF != 0);
@@ -147,9 +162,11 @@ bool MLInference::begin(){
     DEBUG_PRINTF("[ML] Anomaly detection: %s\n",
                  EI_CLASSIFIER_HAS_ANOMALY ? "Y" : "N");
 
-    if(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE != TOTAL_ML_FEATURES){
-        DEBUG_PRINTF("[ML] WARNING: Feature size mismatch! Expected %d, model has %d\n",
-                     TOTAL_ML_FEATURES, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
+    if(!ISC_EI_USES_PIPELINE_FEATURES){
+        DEBUG_PRINTLN(F("[ML] Edge Impulse model disabled: not trained on the pipeline features"));
+    }
+    else if(EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE != TOTAL_ML_FEATURES){
+        DEBUG_PRINTF("[ML] Edge Impulse model reads the first %d of %d pipeline features\n",EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, TOTAL_ML_FEATURES);
     }
     _init = true;
 #else
@@ -172,6 +189,10 @@ bool MLInference::isReady() const {
 //===========================================================================================================
 
 bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data) {
+    if(!sensor_data.primary.complete || !sensor_data.secondary.complete){
+        return false;
+    }
+
     memset(&_feature_buffer, 0, sizeof(_feature_buffer));
 
     _raw_snapshot.valid = false;
@@ -207,6 +228,9 @@ bool MLInference::extractFeatures(const dual_sensor_data_t &sensor_data) {
 bool MLInference::addToWindow(const dual_sensor_data_t &sensor_data){
     if(!sensor_data.valid){
         DEBUG_PRINTLN(F("[MLInference] Invalid sensor data in addToWindow"));
+        return false;
+    }
+    if(!sensor_data.primary.complete || !sensor_data.secondary.complete){
         return false;
     }
 
@@ -951,7 +975,7 @@ bool MLInference::runInference(ml_prediction_t &pred){
 
     //pre-classification ambient check
     float ambientScore = computeAmbientScore(_raw_snapshot);
-    if(ambientScore > 0.85f){
+    if(ambientScore > AMBIENT_GATE_SCORE){
         pred.predictedClass = SCENT_CLASS_AMBIENT;
         pred.confidence = ambientScore;
         pred.valid = true;
@@ -980,7 +1004,8 @@ bool MLInference::runInference(ml_prediction_t &pred){
 
             ei_impulse_result_t ei_result = {0};
             EI_IMPULSE_ERROR res = run_classifier(&signal, &ei_result, false);
-            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+            pred.inferenceTimeUs = micros() - start_time;
+            pred.inferenceTimeMs = pred.inferenceTimeUs / 1000;
 
             if(res != EI_IMPULSE_OK){
                 DEBUG_PRINTLN(F("[MLInference] Inference failed"));
@@ -1026,7 +1051,8 @@ bool MLInference::runInference(ml_prediction_t &pred){
 #else
             uint8_t cls = dt_predict(_feature_buffer.features);
 #endif
-            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+            pred.inferenceTimeUs =micros() - start_time;
+            pred.inferenceTimeMs = pred.inferenceTimeUs / 1000;
             pred.predictedClass = (scent_class_t)cls;
             pred.confidence = confidence;
             memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
@@ -1052,6 +1078,8 @@ bool MLInference::runInference(ml_prediction_t &pred){
 #if ISC_ENABLE_KNN
             float confidence = 0.0f;
             uint8_t cls = knn_predict_with_confidence(_feature_buffer.features, &confidence);
+            pred.inferenceTimeUs = micros() - start_time;
+            pred.inferenceTimeMs = pred.inferenceTimeUs / 1000;
 
             knn_neighbor_t neighbors[KNN_K];
             knn_find_neighbors(_feature_buffer.features, neighbors);
@@ -1063,7 +1091,6 @@ bool MLInference::runInference(ml_prediction_t &pred){
             avg_distance /=KNN_K;
             float calculated_anomaly =fmin(avg_distance / KNN_DISTANCE_SCALE, 1.0f);
 
-            pred.inferenceTimeMs = (micros() - start_time) / 1000;
             pred.predictedClass = (scent_class_t)cls;
             pred.confidence = confidence;
 
@@ -1090,7 +1117,8 @@ bool MLInference::runInference(ml_prediction_t &pred){
 #if ISC_ENABLE_RF
             float confidence = 0.0f;
             uint8_t cls = rf_predict_with_confidence(_feature_buffer.features, &confidence);
-            pred.inferenceTimeMs = (micros() - start_time) / 1000;
+            pred.inferenceTimeUs = micros() - start_time;
+            pred.inferenceTimeMs = pred.inferenceTimeUs / 1000;
             pred.predictedClass = (scent_class_t)cls;
             pred.confidence = confidence;
             memset(pred.classConfidences, 0, sizeof(pred.classConfidences));
@@ -1121,12 +1149,12 @@ bool MLInference::runInference(ml_prediction_t &pred){
 
     if(pred.valid){
         _total_inferences++;
-        _total_inference_time_ms += pred.inferenceTimeMs;
+        _total_inference_time_us += pred.inferenceTimeUs;
         char debugMsg[160];
         snprintf(debugMsg, sizeof(debugMsg),
-                "[Single] Model:%s Class:%d Conf:%.2f Anom:%.2f TimeMs:%lu",
+                "[Single] Model:%s Class:%d Conf:%.2f Anom:%.2f TimeUs:%lu",
                 getActiveModelName(), pred.predictedClass, pred.confidence,
-                pred.anomalyScore, pred.inferenceTimeMs);
+                pred.anomalyScore, pred.inferenceTimeUs);
         logger.logDebugMsg(String(debugMsg));
     }
     return pred.valid;
@@ -1268,12 +1296,12 @@ float MLInference::getAverageInferenceTimeMs() const{
     if(_total_inferences ==0){
         return 0.0f;
     }
-    return (float)_total_inference_time_ms / _total_inferences;
+    return (float)_total_inference_time_us / 1000.0f / _total_inferences;
 }
 
 void MLInference::resetStats(){
     _total_inferences =0;
-    _total_inference_time_ms =0;
+    _total_inference_time_us =0;
 }
 
 //===========================================================================================================
@@ -1349,6 +1377,7 @@ void MLInference::ensembleToPrediction(const ml_ensemble_prediction_t &ens, ml_p
     memset(&pred, 0, sizeof(pred));
     pred.timestamp = ens.timestamp;
     pred.inferenceTimeMs = ens.inferenceTimeMs;
+    pred.inferenceTimeUs = ens.inferenceTimeUs;
     pred.valid = ens.valid;
     pred.confidence = ens.confidence;
     pred.predictedClass = ens.predictedClass;
@@ -1484,6 +1513,9 @@ void MLInference::finaliseTemporalPrediction(ml_prediction_t &finalPred){
 
     float conf = 0.0f;
     scent_class_t sClass = getTemporalPrediction(conf);
+    if(conf < _confidence_threshold){
+        sClass = SCENT_CLASS_UNKNOWN;
+    }
     finalPred.predictedClass=sClass;
     finalPred.confidence=conf;
     finalPred.valid = (_temporal_count >0);
@@ -1603,7 +1635,7 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
 
     //ambient gate
     float ambientScore = computeAmbientScore(_raw_snapshot);
-    if(ambientScore>0.85f){
+    if(ambientScore > AMBIENT_GATE_SCORE){
         pred.predictedClass = SCENT_CLASS_AMBIENT;
         pred.confidence = ambientScore;
         pred.valid = true;
@@ -1616,7 +1648,6 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
         return true;
     }
 
-    uint32_t start=micros();
     uint32_t dt_start=micros();
     // Run all models
     float dtConf = 1.0f, knnConf = 1.0f, rfConf = 1.0f;
@@ -1637,6 +1668,7 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
 #if ISC_ENABLE_KNN
     uint32_t knn_start = micros();
     uint8_t knnCls = knn_predict_with_confidence(_feature_buffer.features, &knnConf);
+    uint32_t knn_time_us = micros() - knn_start;
 
     //KNN anomaly detection via neighbor distances
     knn_neighbor_t neighbors[KNN_K];
@@ -1648,7 +1680,6 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
     avg_distance /= KNN_K;
     float calculated_anomaly =fmin(avg_distance/KNN_DISTANCE_SCALE, 1.0f);
     bool knnIsAnomalous = false;
-    uint32_t knn_time_us = micros() - knn_start;
 #else
     uint8_t knnCls = SCENT_CLASS_UNKNOWN;
     float calculated_anomaly = 0.0f;
@@ -1681,7 +1712,11 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
         rfConf = 0.0f;
     }
 
-    pred.inferenceTimeMs = (micros() - start);
+    pred.dtTimeUs = dt_time_us;
+    pred.knnTimeUs = knn_time_us;
+    pred.rfTimeUs = rf_time_us;
+    pred.inferenceTimeUs = dt_time_us + knn_time_us + rf_time_us;
+    pred.inferenceTimeMs = pred.inferenceTimeUs / 1000;
 
     //results
     pred.dtClass  = (scent_class_t)dtCls;
@@ -1742,9 +1777,9 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
 
     char debugMsg[192];
     snprintf(debugMsg, sizeof(debugMsg),
-            "[Ensemble] DT:%d(%.2f,%lums) KNN:%d(%.2f,A:%.2f,%lums) RF:%d(%.2f,%lums) Total:%lums",
-            dtCls, dtConf, dt_time_us / 1000,knnCls, knnConf, calculated_anomaly, knn_time_us / 1000,
-            rfCls, rfConf, rf_time_us / 1000,pred.inferenceTimeMs);
+            "[Ensemble] DT:%d(%.2f,%luus) KNN:%d(%.2f,A:%.2f,%luus) RF:%d(%.2f,%luus) Total:%luus",
+            dtCls, dtConf, dt_time_us,knnCls, knnConf, calculated_anomaly, knn_time_us,
+            rfCls, rfConf, rf_time_us,pred.inferenceTimeUs);
     DEBUG_PRINTLN(debugMsg);
     logger.logDebugMsg(String(debugMsg));
 
@@ -1762,7 +1797,7 @@ bool MLInference::runEnsembleInference(ml_ensemble_prediction_t &pred){
 
     pred.valid = true;
     _total_inferences++;
-    _total_inference_time_ms += pred.inferenceTimeMs;
+    _total_inference_time_us += pred.inferenceTimeUs;
 
     return true;
 }
@@ -1795,7 +1830,7 @@ void MLInference::printPrediction(const ml_prediction_t &result){
     DEBUG_PRINTF("Confidence: %.2f%%\n", result.confidence * 100);
     DEBUG_PRINTF("Valid: %s\n", result.valid ? "Yes" : "No");
     DEBUG_PRINTF("Anomaly: %s (score: %.2f)\n", result.isAnomalous ? "Yes" : "No", result.anomalyScore);
-    DEBUG_PRINTF("Inference time: %lu us\n", result.inferenceTimeMs);
+    DEBUG_PRINTF("Inference time: %lu us\n", result.inferenceTimeUs);
 
     DEBUG_PRINTLN(F("All class confidences:"));
 #if EI_CLASSIFIER
@@ -1819,7 +1854,7 @@ String MLInference::getPredictionJSON(const ml_prediction_t &result){
     json += "\"valid\":" + String(result.valid ? "true" : "false") + ",";
     json += "\"anomaly\":" + String(result.isAnomalous ? "true" : "false") + ",";
     json += "\"anomaly_score\":" + String(result.anomalyScore, 4) + ",";
-    json += "\"inference_us\":" + String(result.inferenceTimeMs) + ",";
+    json += "\"inference_us\":" + String(result.inferenceTimeUs) + ",";
     json += "\"confidences\":[";
 #if EI_CLASSIFIER
     const int labelCount = EI_CLASSIFIER_LABEL_COUNT;

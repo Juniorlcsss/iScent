@@ -240,11 +240,6 @@ bool DataLogger::logEntry(const dual_sensor_data_t &data, const ml_prediction_t 
         return false;
     }
 
-    //skip calibration entries entirely
-    if(_active_label == LOG_LABEL_CALIBRATION){
-        return true;
-    }
-
     if(!_log_file){
         DEBUG_PRINTLN(F("[DataLogger] Warning: no open log file; stopping logging."));
         _is_logging = false;
@@ -296,7 +291,8 @@ bool DataLogger::logPrediction(const ml_prediction_t &pred){
         return false;
     }
 
-    _log_file.printf("%lu,PRED,%s,%.4f,%.4f\n", pred.timestamp, SCENT_CLASS_NAMES[pred.predictedClass], pred.confidence, pred.anomalyScore);
+    const char* name = (pred.predictedClass < SCENT_CLASS_COUNT) ? SCENT_CLASS_NAMES[pred.predictedClass] : "unknown";
+    _log_file.printf("%lu,PRED,%s,%.4f,%.4f\n", pred.timestamp, name, pred.confidence, pred.anomalyScore);
     return true;
 }
 
@@ -575,8 +571,8 @@ bool DataLogger::writeEntry(const log_entry_t& entry){
     if(entry.label == LOG_LABEL_CALIBRATION){
         _log_file.print("calibration,");
     }
-    else if(entry.label == LOG_LABEL_AMBIENT){
-        _log_file.print("ambient,");
+    else if(entry.label == LOG_LABEL_IDLE){
+        _log_file.print("idle,");
     }
     else if(entry.label == LOG_LABEL_PRED){
         _log_file.print("prediction,");

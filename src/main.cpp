@@ -24,6 +24,7 @@ system_state_t currentState = STATE_INIT;
 error_code_t lastError = ERROR_NONE;
 
 uint32_t lastSampleTime = 0;
+uint32_t sampleStartTime = 0;
 uint32_t lastInferenceTime = 0;
 uint32_t lastDisplayUpdateTime = 0;
 uint32_t warmupStartTime = 0;
@@ -34,6 +35,7 @@ float lastCalibProgressVal = -1.0f;
 uint32_t calibStartTime = 0;
 const uint32_t CALIB_TIMEOUT_MARGIN_MS = 60000UL;
 const uint32_t CALIB_MAX_DURATION_MS = (uint32_t)(BME688_GAS_BASE_SAMPLES * (BME688_SAMPLE_RATE + 500UL)) + CALIB_TIMEOUT_MARGIN_MS;
+const uint32_t CALIB_STALL_MS = 6UL * BME688_SAMPLE_RATE;   //six sample periods without a usable sweep
 
 dual_sensor_data_t currentSensorData;
 ml_prediction_t currentPrediction;
@@ -119,7 +121,7 @@ static char settingsLabelBack[] = "Back";
 static char settingsLabelInfMode[28]="Infer: Single";
 
 //data collection labels
-static char collectLabelSelect[24] = "Label: pure camomile";
+static char collectLabelSelect[24] = "Label: decaf tea";
 static char collectLabelToggle[24] = "Start Collect";
 static char collectLabelBack[] = "Back";
 
@@ -137,7 +139,7 @@ typedef struct {
 
 static const threshold_profile_t THRESHOLD_PROFILES[] = {
     {"Default", ML_CONFIDENCE_THRESHOLD, ML_ANOMALY_THRESHOLD},
-    {"Sensitive", 0.55f, 0.25f},
+    {"Cautious", 0.55f, 0.25f},
     {"Strict", 0.85f, 0.40f}
 };
 static const uint8_t THRESHOLD_PROFILE_COUNT = sizeof(THRESHOLD_PROFILES) / sizeof(THRESHOLD_PROFILES[0]);
@@ -205,7 +207,7 @@ void ensureLoggingActive(){
     if(now - lastLoggingRetryMs < LOGGING_RETRY_INTERVAL_MS) return;
     lastLoggingRetryMs = now;
 
-    logger.setActiveLabel(LOG_LABEL_AMBIENT);
+    logger.setActiveLabel(LOG_LABEL_IDLE);
     if(logger.startLogging()){
         loggingActive = true;
         DEBUG_PRINTLN(F("[AutoLog] Logging active"));
@@ -319,6 +321,7 @@ void initialiseSystem(){
     }
 
     //init ble
+#if BLE_ENABLED
     DEBUG_PRINTLN(F("[INIT] Initializing BLE..."));
     if(!ble.begin()){
         DEBUG_PRINTLN(F("[ERROR] BLE initialization failed! Continuing without BLE."));
@@ -327,6 +330,9 @@ void initialiseSystem(){
     else{
         ble.startAdvertising();
     }
+#else
+    DEBUG_PRINTLN(F("[INIT] BLE disabled (BLE_ENABLED in config.h)"));
+#endif
 
     DEBUG_PRINTLN(F("[INIT] Starting sensor warm-up..."));
     enterState(STATE_WARMUP);
@@ -373,7 +379,7 @@ void handleStateMachine(){
         case STATE_WARMUP:
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
                 if(performSampling()){
-                    lastSampleTime = millis();
+                    lastSampleTime = sampleStartTime;
                 }
             }
 
@@ -397,7 +403,7 @@ void handleStateMachine(){
         case STATE_CALIBRATING:
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
                 if(performSampling()){
-                    lastSampleTime = millis();
+                    lastSampleTime = sampleStartTime;
                 }
             }
 
@@ -415,28 +421,27 @@ void handleStateMachine(){
                     lastCalibDebugTime = now;
                 }
 
+                bool giveUp = false;
                 if(prog > lastCalibProgressVal + 0.001f){
                     lastCalibProgressVal = prog;
                     lastCalibProgressMs = now;
                 }
-                else if(target > 0 && collected + 1 >= target && (now - lastCalibProgressMs) > 3000UL){
-                    logger.logCalibDebug("CALIB_N_MINUS_ONE_FORCE_FINISH");
-                    sensors.finishCalibration();
-                }
-                else if(prog >= 0.95f && (now - lastCalibProgressMs) > 12000UL){
-                    logger.logCalibDebug("CALIB_NEAR_DONE_FORCE_FINISH");
-                    sensors.finishCalibration();
-                }
-                else if(now - lastCalibProgressMs > 45000UL){
+                else if(now - lastCalibProgressMs > CALIB_STALL_MS){
                     char buf[128];
                     snprintf(buf, sizeof(buf), "CALIB_STALL prog=%.3f dt=%lu", 
                         prog, (unsigned long)(now - lastCalibProgressMs));
                     logger.logCalibDebug(String(buf));
-                    sensors.finishCalibration();
+                    giveUp = true;
                 }
                 else if(calibStartTime > 0 && (now - calibStartTime) > CALIB_MAX_DURATION_MS){
                     logger.logCalibDebug("CALIB_TIMEOUT_SAVE");
-                    sensors.finishCalibration();
+                    giveUp = true;
+                }
+
+                if(giveUp && !sensors.finishCalibration()){
+                    //nothing was collected: leave any stored calibration as it is
+                    sensors.cancelCalibration();
+                    lastError = ERROR_CALIBRATION_FAILED;
                 }
             }
 
@@ -457,11 +462,14 @@ void handleStateMachine(){
             break;
 
         case STATE_SAMPLING:
-            if(performSampling()){
-                lastSampleTime = millis();
+            if(!performSampling()){
+                enterState(STATE_IDLE);
+            }
+            else{
+                lastSampleTime = sampleStartTime;
 
                 //move to inference if ready
-                if(continuousInference && ml.isFeatureBufferReady()){
+                if(continuousInference && currentSensorData.complete && ml.isFeatureBufferReady()){
                     //base off mode
                     switch(ml.getInferenceMode()){
                         case INFERENCE_MODE_TEMPORAL:
@@ -485,7 +493,7 @@ void handleStateMachine(){
         case STATE_INFERENCING:
             if(millis() - lastSampleTime >= BME688_SAMPLE_RATE){
                 if(performSampling()){
-                    lastSampleTime = millis();
+                    lastSampleTime = sampleStartTime;
                 }
             }
 
@@ -509,7 +517,7 @@ void handleStateMachine(){
         case STATE_TEMPORAL_COLLECTING:
             if(millis()-lastSampleTime>=BME688_SAMPLE_RATE){
                 if(performSampling()){
-                    lastSampleTime = millis();
+                    lastSampleTime = sampleStartTime;
                 }
             }
 
@@ -552,8 +560,8 @@ void enterState(system_state_t newState){
     //exit acts
     switch(currentState){
         case STATE_CALIBRATING:
-            if(sensors.isCalibrating()){
-                sensors.finishCalibration();
+            if(sensors.isCalibrating() && !sensors.finishCalibration()){
+                sensors.cancelCalibration();
             }
             calibStartTime = 0;
             break;
@@ -594,7 +602,7 @@ void enterState(system_state_t newState){
                 }
                 
                 if(!collectingLabeled && display.getMode() != DISPLAY_MODE_PREDICTION){
-                    logger.setActiveLabel(LOG_LABEL_AMBIENT);
+                    logger.setActiveLabel(LOG_LABEL_IDLE);
                 }
                 if(!logger.isLogging()){
                     logger.startLogging();
@@ -653,50 +661,20 @@ void enterState(system_state_t newState){
 //===========================================================================================================
 
 bool performSampling(){
-    const bool needsAmbientRead = (currentState != STATE_CALIBRATING);
-
-    dual_sensor_data_t ambientData;
-    bool ambientOk = true;
-
-    if(needsAmbientRead){
-        ambientOk = sensors.performFullScan(ambientData);
-        if(!ambientOk && sensors.getLastError() != ERROR_NONE){
-            lastError = ERROR_SENSOR_READ;
-        }
-    }
+    sampleStartTime = millis();
+    lastSampleTime = sampleStartTime;
 
     bool parallelOk = sensors.readParallelScan(currentSensorData);
-    if(!parallelOk && sensors.getLastError() != ERROR_NONE){
-        lastError = ERROR_SENSOR_READ;
-    }
-
-    if(!ambientOk || !parallelOk){
+    if(!parallelOk){
+        if(sensors.getLastError() != ERROR_NONE){
+            lastError = ERROR_SENSOR_READ;
+        }
         return false;
     }
 
-    if(needsAmbientRead){
-        currentSensorData.primary.temperatures[0]   = ambientData.primary.temperatures[0];
-        currentSensorData.primary.humidities[0]     = ambientData.primary.humidities[0];
-        currentSensorData.primary.pressures[0]      = ambientData.primary.pressures[0];
-        currentSensorData.primary.validReadings     = ambientData.primary.validReadings;
-
-        currentSensorData.secondary.temperatures[0] = ambientData.secondary.temperatures[0];
-        currentSensorData.secondary.humidities[0]   = ambientData.secondary.humidities[0];
-        currentSensorData.secondary.pressures[0]    = ambientData.secondary.pressures[0];
-        currentSensorData.secondary.validReadings   = ambientData.secondary.validReadings;
-
-        currentSensorData.delta_temp = ambientData.primary.temperatures[0] - ambientData.secondary.temperatures[0];
-        currentSensorData.delta_hum  = ambientData.primary.humidities[0]   - ambientData.secondary.humidities[0];
-        currentSensorData.delta_pres = ambientData.primary.pressures[0]    - ambientData.secondary.pressures[0];
-
-        //capture runtime baselines
-        if(!sensors.hasRuntimeBaselines()){
-            float t=ambientData.primary.temperatures[0];
-            float h=ambientData.primary.humidities[0];
-            if(t>-40.0f && t <85.0f&& h >= 0.0f&&h<= 100.0f){
-                sensors.setRuntimeBaselines(t,h);
-            }
-        }
+    if(!currentSensorData.complete){
+        DEBUG_PRINTLN(F("[Sample] Incomplete sweep discarded"));
+        return true;
     }
 
     ml.addToWindow(currentSensorData);
@@ -1290,7 +1268,7 @@ void dataCollectActionToggle(){
     if(collectingLabeled){
         //stop collecting
         logger.flush();
-        logger.setActiveLabel(LOG_LABEL_AMBIENT);
+        logger.setActiveLabel(LOG_LABEL_IDLE);
         collectingLabeled = false;
     } 
     else {
@@ -1301,7 +1279,7 @@ void dataCollectActionToggle(){
 
         //make sure logging is active
         if(!logger.isLogging()){
-            logger.setActiveLabel(LOG_LABEL_AMBIENT);
+            logger.setActiveLabel(LOG_LABEL_IDLE);
             logger.startLogging();
             loggingActive =true;
         }

@@ -244,8 +244,8 @@ void DisplayHandler::showSensorDataScreen(const dual_sensor_data_t &data){
         }
     }
 
-    float pPressHpa = data.primary.pressures[0] / 100.0f;
-    float sPressHpa = data.secondary.pressures[0] / 100.0f;
+    float pPressHpa = data.primary.pressures[0];
+    float sPressHpa = data.secondary.pressures[0];
 
     int16_t y = 12;
     _dsp->setCursor(0, y);

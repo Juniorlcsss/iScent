@@ -21,7 +21,7 @@ typedef struct{
 
 //labels
 static const int16_t LOG_LABEL_CALIBRATION = -2;
-static const int16_t LOG_LABEL_AMBIENT = -3;
+static const int16_t LOG_LABEL_IDLE = -3;
 static const int16_t LOG_LABEL_PRED = -4;
 
 class DataLogger {
