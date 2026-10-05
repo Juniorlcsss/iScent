@@ -65,6 +65,8 @@ public:
     void setMinSamples(uint8_t m) {_minSamples = m;}
     void setFeatureSubsetRatio(float r) {_featureSubsetRatio = r;}
 
+    static void setSeed(uint32_t seed);
+
     //save
     bool saveModel(const char* filename) const;
     bool loadModel(const char* filename);

@@ -13,6 +13,12 @@
 #include <omp.h>
 #endif
 
+static uint32_t g_rfSeed = 0;
+
+void RandomForest::setSeed(uint32_t seed){
+    g_rfSeed = seed;
+}
+
 void RandomForest::exportAsHeader(const char* path) const {
     std::string binPath = std::string(path) + ".bin";
     if(saveModel(binPath.c_str())){
@@ -266,10 +272,19 @@ void RandomForest::train(const ml_training_sample_t *samples, uint16_t count, ui
     //per-tree storage
     std::vector<RFNode*> builtTrees(_numTrees, nullptr);
     std::vector<std::vector<uint16_t>> outOfBagSets(_numTrees);
+    std::vector<std::vector<float>> treeImportance(_numTrees);
     std::vector<uint32_t> seeds(_numTrees);
-    std::random_device rd;
-    for (uint16_t i = 0; i < _numTrees; ++i) {
-        seeds[i] = rd();
+    if(g_rfSeed != 0){
+        std::mt19937 seeder(g_rfSeed);
+        for(uint16_t i=0; i<_numTrees;++i){
+            seeds[i] =seeder();
+        }
+    }
+    else{
+        std::random_device rd;
+        for(uint16_t i = 0; i < _numTrees; ++i){
+            seeds[i] = rd();
+        }
     }
 
     std::cout << "Training Random Forest with " << _numTrees << " trees." << std::endl;
@@ -289,13 +304,7 @@ void RandomForest::train(const ml_training_sample_t *samples, uint16_t count, ui
         builtTrees[i] = tree;
         outOfBagSets[i] = std::move(outOfBag);
 
-        //reduce fi
-        #pragma omp critical
-        {
-            for (uint16_t f=0; f<_featureCount; ++f) {
-                _featureImportance[f] += localImportance[f];
-            }
-        }
+        treeImportance[i] = std::move(localImportance);
 
         int done = ++builtCount;
         if (done % 10 == 0 || done == _numTrees) {
@@ -306,6 +315,13 @@ void RandomForest::train(const ml_training_sample_t *samples, uint16_t count, ui
         }
     }
     std::cout << std::endl;
+
+    //reduce fi in tree order
+    for(uint16_t i=0;i<_numTrees; ++i){
+        for (uint16_t f=0; f<_featureCount; ++f) {
+            _featureImportance[f] += treeImportance[i][f];
+        }
+    }
 
     _trees = std::move(builtTrees);
 
