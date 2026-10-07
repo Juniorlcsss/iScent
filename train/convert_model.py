@@ -55,16 +55,17 @@ FEATURE_NAMES_BASE=[
     "cross_ratio_mean", "cross_ratio_slope", "cross_ratio_var",
 ]
 
+#indices 73-81 in the trainer
 FEATURE_NAMES_ENV=[
-    "env_gas1_raw",
-    "env_gas2_raw",
-    "env_gas1_baseline",
-    "env_temp1_raw",
-    "env_hum1_raw",
-    "env_gas2_baseline",
-    "env_temp2_raw",
-    "env_hum2_raw",
-    "env_hum2_extra",
+    "abs_delta_temp",
+    "abs_delta_hum",
+    "abs_delta_pres",
+    "temp1_raw",
+    "hum1_raw",
+    "pres1_raw",
+    "temp2_raw",
+    "hum2_raw",
+    "pres2_raw",
 ]
 
 BASE_FEATURE_COUNT=73
@@ -94,9 +95,9 @@ def build_full_feature_names(total_count):
         names.append(f"log_ratio_s{i}")
 
     pairs=[
-        "g2n2×cr1", "g2n2×crSlope", "g1n2×diff1", "slope2×cr0",
-        "g2d2×cr2", "g2n3×crMean", "diff5×cr3", "g1n3×g1d6",
-        "g1n2×diff5", "g2n4×g2d3"
+        "g2n2*cr1", "g2n2*crSlope", "g1n2*diff1", "slope2*cr0",
+        "g2d2*cr2", "g2n3*crMean", "diff5*cr3", "g1n3*g1d6",
+        "g1n2*diff5", "g2n4*g2d3"
     ]
     for p in pairs:
         names.append(f"interact_{p}")
@@ -155,6 +156,14 @@ FS={
     "selected_stds": [],
     "uses_robust": False,
 }
+
+
+def cf(v):
+    """C float literal that round-trips a 32-bit float exactly (9 significant digits)"""
+    t=f"{float(v):.9g}"
+    if not any(ch in t for ch in ".eEn"):
+        t+=".0"
+    return t + "f"
 
 
 def extract_array(name, txt):
@@ -407,6 +416,18 @@ def dt_flatten_tree(tree):
     return flat
 
 
+def model_feature_count(bin_count, kind):
+    if FS["loaded"] and FS["selected_count"]:
+        fs_n=FS["selected_count"]
+        if 0 < bin_count <= fs_n:
+            if bin_count < fs_n:
+                print(f"  note: {kind} uses the first {bin_count} of {fs_n} selected features")
+            return bin_count
+        print(f"  note: binary says {bin_count} features, feature_select.h says {fs_n}. using {fs_n}.")
+        return fs_n
+    return bin_count
+
+
 def load_dt(path):
     with open(path, "rb") as f:
         magic, ver=struct.unpack("<IH", f.read(6))
@@ -420,12 +441,7 @@ def load_dt(path):
         min_samples=struct.unpack("<B", f.read(1))[0]
         tree=dt_read_tree(f, ver)
 
-    if FS["loaded"]:
-        fs_count=FS["selected_count"]
-
-        if fs_count and fs_count != feat_count:
-            print(f"  note: binary says {feat_count} features, feature_select.h says {fs_count}. using {fs_count}.")
-            feat_count=fs_count
+    feat_count=model_feature_count(feat_count, "DT")
 
     flat_nodes=dt_flatten_tree(tree)
 
@@ -534,9 +550,9 @@ def write_dt_header(m, out_path):
         f.write("#include <string.h>\n\n")
 
         write_progmem_macros(f)
-        f.write("#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT != ")
+        f.write("#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT < ")
         f.write(f"{m['feature_count']}\n")
-        f.write('  #error "DT model feature count does not match SELECTED_FEATURE_COUNT"\n')
+        f.write('  #error "DT model uses more features than SELECTED_FEATURE_COUNT"\n')
         f.write("#endif\n\n")
 
         f.write("// Model Parameters\n")
@@ -550,7 +566,7 @@ def write_dt_header(m, out_path):
 
         f.write("// Node Structure\n")
         f.write("typedef struct {\n")
-        f.write("    int8_t featureIndex;\n")
+        f.write("    int16_t featureIndex;\n")
         f.write("    uint8_t label;\n")
         f.write("    float threshold;\n")
         f.write("    uint16_t majorityCount;\n")
@@ -572,7 +588,7 @@ def write_dt_header(m, out_path):
                 c=f"  // {fname} < {n['threshold']:.4f}?"
 
             f.write(f"    {{{n['feature_index']}, {n['label']}, ")
-            f.write(f"{n['threshold']:.6f}f, ")
+            f.write(f"{cf(n['threshold'])}, ")
             f.write(f"{n['majority_count']}, {n['total_samples']}, ")
             f.write(f"{n['left_child']}, {n['right_child']}}}")
             if i < total_nodes - 1:
@@ -608,12 +624,7 @@ def load_knn(path):
             feats=list(struct.unpack(f"<{bin_feat_count}f", f.read(4 * bin_feat_count)))
             samples.append({"label": label, "features": feats})
 
-    feat_count=bin_feat_count
-    if FS["loaded"]:
-        fs_n=FS["selected_count"]
-        if fs_n and fs_n != feat_count:
-            print(f"  note: binary says {feat_count} features, feature_select.h says {fs_n}. using {fs_n}.")
-            feat_count=fs_n
+    feat_count=model_feature_count(bin_feat_count, "KNN")
 
     for s in samples:
         if len(s["features"]) > feat_count:
@@ -762,8 +773,8 @@ def write_knn_header(m, out_path):
         f.write("#include <math.h>\n\n")
 
         write_progmem_macros(f)
-        f.write(f"#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT != {m['feature_count']}\n")
-        f.write('  #error "KNN model feature count does not match SELECTED_FEATURE_COUNT"\n')
+        f.write(f"#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT < {m['feature_count']}\n")
+        f.write('  #error "KNN model uses more features than SELECTED_FEATURE_COUNT"\n')
         f.write("#endif\n\n")
 
         f.write("// Model Parameters\n")
@@ -792,7 +803,7 @@ def write_knn_header(m, out_path):
             name=CLASS_NAMES[lbl] if lbl < len(CLASS_NAMES) else f"class_{lbl}"
             f.write(f"    {{{lbl}, {{")
             for j, feat in enumerate(s["features"]):
-                f.write(f"{feat:.6f}f")
+                f.write(cf(feat))
                 if j < len(s["features"]) - 1:
                     f.write(", ")
             f.write("}}")
@@ -898,12 +909,7 @@ def load_rf(path):
         for _ in range(tree_count):
             trees.append(rf_read_tree(f))
 
-    feat_count=bin_feat_count
-    if FS["loaded"]:
-        chosen=FS["selected_count"]
-        if chosen and chosen != feat_count:
-            print(f"  note: binary says {feat_count} features, feature_select.h says {chosen}. using {chosen}.")
-            feat_count=chosen
+    feat_count=model_feature_count(bin_feat_count, "RF")
 
     if len(feat_imp) > feat_count:
         feat_imp=feat_imp[:feat_count]
@@ -1053,8 +1059,8 @@ def write_rf_header(m, out_path):
         f.write("#include <string.h>\n\n")
 
         write_progmem_macros(f)
-        f.write(f"#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT != {m['feature_count']}\n")
-        f.write('  #error "RF model feature count does not match SELECTED_FEATURE_COUNT"\n')
+        f.write(f"#if defined(SELECTED_FEATURE_COUNT) && SELECTED_FEATURE_COUNT < {m['feature_count']}\n")
+        f.write('  #error "RF model uses more features than SELECTED_FEATURE_COUNT"\n')
         f.write("#endif\n\n")
 
         f.write("// Model Parameters\n")
@@ -1079,7 +1085,7 @@ def write_rf_header(m, out_path):
 
         f.write("// Node Structure\n")
         f.write("typedef struct {\n")
-        f.write("    int8_t featureIndex;\n")
+        f.write("    int16_t featureIndex;\n")
         f.write("    uint8_t label;\n")
         f.write("    float threshold;\n")
         f.write("    int32_t leftChild;\n")
@@ -1093,7 +1099,7 @@ def write_rf_header(m, out_path):
                 f.write(f"    // --- Tree {tree_idx} ---\n")
 
             f.write(f"    {{{n['feature_index']}, {n['label']}, ")
-            f.write(f"{n['threshold']:.6f}f, ")
+            f.write(f"{cf(n['threshold'])}, ")
             f.write(f"{n['left_child']}, {n['right_child']}}}")
             if i < total_nodes - 1:
                 f.write(",")
@@ -1197,7 +1203,7 @@ def convert_feature_stats(in_path, out_path):
         for i, v in enumerate(center_vals):
             name=names[i] if i < len(names) else f"feature_{i}"
             comma="," if i < count - 1 else ""
-            f.write(f"    {v:.8f}f{comma}  // [{i}] {name}\n")
+            f.write(f"    {cf(v)}{comma}  // [{i}] {name}\n")
         f.write("};\n\n")
 
         f.write(f"// Feature {scale_comment}\n")
@@ -1205,7 +1211,7 @@ def convert_feature_stats(in_path, out_path):
         for i, v in enumerate(scale_vals):
             name=names[i] if i < len(names) else f"feature_{i}"
             comma="," if i < count - 1 else ""
-            f.write(f"    {v:.8f}f{comma}  // [{i}] {name}\n")
+            f.write(f"    {cf(v)}{comma}  // [{i}] {name}\n")
         f.write("};\n\n")
 
         f.write("static inline float normalize_feature(float value, int idx) {\n")
@@ -1303,7 +1309,7 @@ def convert_feature_select(in_path, out_path):
                     orig_idx=local["selected_indices"][i] if i < len(local["selected_indices"]) else -1
                     name=names[orig_idx] if 0 <= orig_idx < len(names) else f"feature_{orig_idx}"
                     comma="," if i < local["selected_count"] - 1 else ""
-                    f.write(f"    {m:.8f}f{comma}  // [{i}] {name}\n")
+                    f.write(f"    {cf(m)}{comma}  // [{i}] {name}\n")
                 f.write("};\n\n")
 
             if local["selected_iqrs"]:
@@ -1315,7 +1321,7 @@ def convert_feature_select(in_path, out_path):
                     warning=""
                     if abs(iqr_val - 1.0) < 1e-6:
                         warning="  // NOTE: defaulted IQR"
-                    f.write(f"    {iqr_val:.8f}f{comma}  // [{i}] {name}{warning}\n")
+                    f.write(f"    {cf(iqr_val)}{comma}  // [{i}] {name}{warning}\n")
                 f.write("};\n\n")
 
             f.write("// Normalize a selected feature using robust scaling\n")
@@ -1330,7 +1336,7 @@ def convert_feature_select(in_path, out_path):
                     orig_idx=local["selected_indices"][i] if i < len(local["selected_indices"]) else -1
                     name=names[orig_idx] if 0 <= orig_idx < len(names) else f"feature_{orig_idx}"
                     comma="," if i < local["selected_count"] - 1 else ""
-                    f.write(f"    {m:.8f}f{comma}  // [{i}] {name}\n")
+                    f.write(f"    {cf(m)}{comma}  // [{i}] {name}\n")
                 f.write("};\n\n")
 
             if local["selected_stds"]:
@@ -1339,7 +1345,7 @@ def convert_feature_select(in_path, out_path):
                     orig_idx=local["selected_indices"][i] if i < len(local["selected_indices"]) else -1
                     name=names[orig_idx] if 0 <= orig_idx < len(names) else f"feature_{orig_idx}"
                     comma="," if i < local["selected_count"] - 1 else ""
-                    f.write(f"    {s:.8f}f{comma}  // [{i}] {name}\n")
+                    f.write(f"    {cf(s)}{comma}  // [{i}] {name}\n")
                 f.write("};\n\n")
 
             f.write("// Normalize a selected feature using z-score\n")
@@ -1388,7 +1394,7 @@ def convert_ensemble_weights(in_path, out_path):
     with open(out_path, "w") as f:
         f.write("// Auto-generated ensemble weights\n")
         f.write(f"// Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"// Weights are accuracy^{int(weight_power)} from training evaluation\n")
+        f.write(f"// Weights are accuracy^{int(weight_power)} (cross-validated accuracy on the training partition)\n")
         f.write(f"// DT accuracy:   ~{dt_acc * 100:.1f}%\n")
         f.write(f"// KNN accuracy:  ~{knn_acc * 100:.1f}%\n")
         f.write(f"// RF accuracy:   ~{rf_acc * 100:.1f}%\n")
@@ -1396,9 +1402,11 @@ def convert_ensemble_weights(in_path, out_path):
             f.write(f"// Hier accuracy: ~{hier_acc * 100:.1f}%\n")
         f.write("//\n")
         f.write("// Ensemble uses confidence-weighted voting:\n")
-        f.write("//   KNN and RF contribute weight * confidence\n")
-        f.write("//   Hierarchical uses soft probability routing\n")
-        f.write("//   DT is heavily damped (no confidence, weak accuracy)\n\n")
+        f.write("//   DT, KNN and RF contribute weight * confidence to their class\n")
+        f.write("//   and spread weight * (1 - confidence) over the other classes\n")
+        if has_hier:
+            f.write("//   Hierarchical uses soft probability routing\n")
+        f.write("\n")
 
         f.write("#ifndef ENSEMBLE_WEIGHTS_H\n")
         f.write("#define ENSEMBLE_WEIGHTS_H\n\n")
@@ -1406,11 +1414,11 @@ def convert_ensemble_weights(in_path, out_path):
         f.write(f"#define ENSEMBLE_WEIGHT_POWER {int(weight_power)}\n")
         f.write(f"#define ENSEMBLE_HAS_HIERARCHICAL {1 if has_hier else 0}\n\n")
 
-        f.write(f"static const float DT_WEIGHT={dt_w:.6f}f;   // acc ~{dt_acc * 100:.1f}%\n")
-        f.write(f"static const float KNN_WEIGHT={knn_w:.6f}f;  // acc ~{knn_acc * 100:.1f}%\n")
-        f.write(f"static const float RF_WEIGHT={rf_w:.6f}f;   // acc ~{rf_acc * 100:.1f}%\n")
+        f.write(f"static const float DT_WEIGHT={cf(dt_w)};   // acc ~{dt_acc * 100:.1f}%\n")
+        f.write(f"static const float KNN_WEIGHT={cf(knn_w)};  // acc ~{knn_acc * 100:.1f}%\n")
+        f.write(f"static const float RF_WEIGHT={cf(rf_w)};   // acc ~{rf_acc * 100:.1f}%\n")
         if has_hier:
-            f.write(f"static const float HIER_WEIGHT={hier_w:.6f}f; // acc ~{hier_acc * 100:.1f}%\n")
+            f.write(f"static const float HIER_WEIGHT={cf(hier_w)}; // acc ~{hier_acc * 100:.1f}%\n")
 
         total_w=dt_w + knn_w + rf_w + hier_w
         if total_w > 0:
@@ -1578,7 +1586,46 @@ def convert_all(input_dir=".", output_dir="."):
             print(f"  FAILED to process anomaly_threshold.h: {e}")
             failed += 1
 
-    total_possible=len(MODEL_FILE_MAP) + 4
+    ag_in=in_dir / "ambient_gate.h"
+    if ag_in.exists():
+        ag_out=out_dir / "ambient_gate.h"
+        if ag_in.resolve() != ag_out.resolve():
+            shutil.copy2(str(ag_in), str(ag_out))
+            print(f"\nCopied ambient_gate.h to {out_dir}")
+        converted += 1
+    else:
+        print(f"\nSkipping ambient_gate.h (not found in {in_dir}); the device falls back to the old gate threshold")
+
+    fw_in=in_dir / "fisher_weights.h"
+    if fw_in.exists():
+        try:
+            print(f"\n{'=' * 60}")
+            print("Validating: fisher_weights.h")
+            print(f"{'=' * 60}")
+
+            fw_out=out_dir / "fisher_weights.h"
+            if fw_in.resolve() != fw_out.resolve():
+                shutil.copy2(str(fw_in), str(fw_out))
+                print(f"  Copied fisher_weights.h to {out_dir}")
+            else:
+                print("  Input and output are same file, skipping copy")
+
+            with open(str(fw_in), "r") as fwf:
+                fw_txt=fwf.read()
+            pairs=extract_define("FISHER_PAIR_COUNT", fw_txt)
+            base=extract_define("FISHER_BASE_FEATURE_COUNT", fw_txt)
+            print(f"  Fisher pairs: {pairs}, base features: {base}")
+            if FS["loaded"] and pairs is not None and base is not None and FS["original_count"] != base + pairs:
+                print(f"  WARNING: ORIGINAL_FEATURE_COUNT ({FS['original_count']}) != " f"FISHER_BASE_FEATURE_COUNT + FISHER_PAIR_COUNT ({base + pairs})")
+
+            converted += 1
+        except Exception as e:
+            print(f"  FAILED to process fisher_weights.h: {e}")
+            failed += 1
+    else:
+        print(f"\nSkipping fisher_weights.h (not found in {in_dir})")
+
+    total_possible=len(MODEL_FILE_MAP) + 5
     total_attempted=converted + failed
     skipped=total_possible - total_attempted
 

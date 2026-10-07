@@ -11,11 +11,56 @@
 #include <chrono>
 #include <set>
 #include <sstream>
+#include <filesystem>
+#include <cctype>
 
 #include "csv_loader.h"
 #include "dt.h"
 #include "knn.h"
 #include "rf.h"
+
+
+//===========================================================================================================
+//training config
+//===========================================================================================================
+
+static int NUM_SELECTED_FEATURES = 0;
+static int MAX_SELECTED_FEATURES = 0;
+static int MIN_SEARCH_FEATURES = 10;
+static int FEATURE_STEP = 5;
+
+static uint32_t RANDOM_SEED = 42;
+static float TRAIN_RATIO = 0.8f;
+static bool SESSION_SPLIT = false;
+static int CV_FOLDS = 5;
+static bool QUICK_RF_GRID = false;
+
+static float CONFIDENCE_THRESHOLD = 0.30f;
+static bool EXCLUDE_ENV_FROM_FISHER = true;
+static bool EXPORT_ONLY = false;
+static bool EXCLUDE_ENV_DERIVED = false;
+
+static std::string OUTPUT_DIR = ".";
+
+//C float literal that round-trips exactly (9 significant digits)
+static std::string cFloat(float v){
+    std::ostringstream o;
+    o << std::setprecision(9) << v;
+    std::string t = o.str();
+    if(t.find_first_of(".eEn") == std::string::npos){
+        t += ".0";
+    }
+    return t + "f";
+}
+
+static std::string outPath(const std::string& name){
+    return (std::filesystem::path(OUTPUT_DIR) / name).string();
+}
+
+//raw environmental readings [76-81]
+static const int ENV_RAW[] = {76, 77, 78, 79, 80, 81};
+//environment-derived features: |dT|,|dH|,|dP| [73-75] and humidity/temperature compensation [145-152]
+static const int ENV_DERIVED[] = {73, 74, 75, 145, 146, 147, 148, 149, 150, 151, 152};
 
 
 //timer
@@ -33,11 +78,21 @@ struct Timer {
     }
 };
 
+struct QuietCout {
+    class NullBuf : public std::streambuf {
+    protected:
+        int overflow(int c) override { return (c == EOF) ? 0 : c; }
+    };
+    NullBuf nullBuf;
+    std::streambuf* prev;
+    QuietCout(){ prev = std::cout.rdbuf(&nullBuf); }
+    ~QuietCout(){ std::cout.rdbuf(prev); }
+};
+
 
 void printMetrics(const ml_metrics_t& m, const char* modelName){
     std::cout << "\n--- " << modelName << " Results ---" << std::endl;
-    std::cout << "Accuracy: " << std::fixed << std::setprecision(2)
-              << (m.accuracy * 100) << "% (" << m.correct << "/" << m.total << ")" << std::endl;
+    std::cout << "Accuracy: " << std::fixed << std::setprecision(2) << (m.accuracy * 100) << "% (" << m.correct << "/" << m.total << ")" << std::endl;
 }
 
 void printPerClassMetrics(const ml_metrics_t& m){
@@ -74,28 +129,68 @@ void printConfusionMatrix(const ml_metrics_t& m){
 }
 
 static const char* shortFeatureName(int idx){
-    static char buf[24];
+    static char buf[32];
     if (idx < 10){ snprintf(buf, sizeof(buf), "g1n_s%d", idx); return buf; }
     if (idx < 20){ snprintf(buf, sizeof(buf), "g2n_s%d", idx - 10); return buf; }
     if (idx < 30){ snprintf(buf, sizeof(buf), "cr_s%d", idx - 20); return buf; }
     if (idx < 40){ snprintf(buf, sizeof(buf), "diff_s%d", idx - 30); return buf; }
     if (idx < 49){ snprintf(buf, sizeof(buf), "g1d_s%d", idx - 40); return buf; }
     if (idx < 58){ snprintf(buf, sizeof(buf), "g2d_s%d", idx - 49); return buf; }
-    static const char* names[]={
+    static const char* summaryNames[]={
         "slope1_n", "slope2_n", "curv1_n", "curv2_n",
         "auc1_n", "auc2_n", "peak1", "peak2",
         "range1", "range2", "late_early1", "late_early2",
-        "cr_mean", "cr_slope", "cr_var"
+        "cr_mean", "cr_slope", "cr_var",
+        "abs_dtemp", "abs_dhum", "abs_dpres",
+        "temp1", "hum1", "pres1", "temp2", "hum2", "pres2"
     };
-    static const char* fisherNames[] = {"fisher_coff_dtea","fisher_dtea_tea","fisher_dcoff_coff","fisher_dtea_dcoff"};
 
-    if(idx >= 145&&idx<149){ 
-        return fisherNames[idx-145];
+    if(idx < 82){
+        return summaryNames[idx - 58];
     }
 
-    int offset=idx - 58;
-    int numNames=sizeof(names) / sizeof(names[0]);
-    if (offset >= 0 && offset < numNames) return names[offset];
+    if(idx < 92){
+        snprintf(buf, sizeof(buf), "n_ratio_s%d", idx - 82);
+        return buf;
+    }
+    if(idx < 97){
+        snprintf(buf, sizeof(buf), "ln_ratio_s%d", idx - 92);
+        return buf;
+    }
+    static const char* interactionNames[]={
+        "g2n_s2*cr_s1", "g2n_s2*cr_slope", "g1n_s2*diff_s1", "slope2*cr_s0", "g2d_s2*cr_s2",
+        "g2n_s3*cr_mean", "diff_s5*cr_s3", "g1n_s3*g1d_s6", "g1n_s2*diff_s5", "g2n_s4*g2d_s3"
+    };
+
+    if(idx<107){
+        return interactionNames[idx - 97];
+    }
+
+    if(idx < 116){
+        snprintf(buf, sizeof(buf), "cr_d_s%d", idx - 107);
+        return buf;
+    }
+
+    if(idx < 125){
+        snprintf(buf, sizeof(buf), "dratio_s%d", idx - 116);
+        return buf; 
+    }
+
+    if(idx < 133){
+        snprintf(buf, sizeof(buf), "g2dd_s%d", idx - 125);
+        return buf;
+    }
+
+    static const char* laterNames[]={
+        "recovery1", "recovery2", "max_div", "cr_late_early",
+        "seg1_early/late", "seg1_mid/late", "seg2_early/late", "seg2_mid/late",
+        "seg_early_1/2", "seg_late_1/2", "curv_mid1", "curv_mid2",
+        "g2n_s2/hum", "g1n_s2/hum", "cr_s0/hum", "diff_s1/hum", "slope2/hum", "cr_mean/hum",
+        "g2n_s2/temp1", "cr_s0/temp1",
+        "fisher_coff_dtea", "fisher_dtea_tea", "fisher_dcoff_coff", "fisher_dtea_dcoff"
+    };
+    int offset = idx - 133;
+    if (offset >= 0 && offset < (int)(sizeof(laterNames) / sizeof(laterNames[0]))) return laterNames[offset];
     snprintf(buf, sizeof(buf), "f_%d", idx);
     return buf;
 }
@@ -384,97 +479,16 @@ int addEngineeredFeatures(csv_training_sample_t* samples, uint16_t count,int cur
 }
 
 
+
 //===========================================================================================================
 //feat selection
 //===========================================================================================================
 struct FeatureSelector {
     std::vector<int> selectedIndices;
-    int originalCount;
-    int selectedCount;
+    int originalCount = 0;
+    int selectedCount = 0;
 
-    void selectFeatures(const csv_training_sample_t* samples, uint16_t count,
-                        int featureCount, float minFRatio=0.5f,
-                        int maxFeatures=45){
-        originalCount=featureCount;
-
-        struct FeatureScore {
-            int index;
-            float score;
-        };
-        std::vector<FeatureScore> scores(featureCount);
-
-        for(int f=0; f < featureCount; f++){
-            float classMeans[SCENT_CLASS_COUNT]={0};
-            float classVars[SCENT_CLASS_COUNT]={0};
-            int classCounts[SCENT_CLASS_COUNT]={0};
-
-            for(int i=0; i < count; i++){
-                int c=samples[i].label;
-                if (c >= SCENT_CLASS_COUNT) continue;
-                classMeans[c] += samples[i].features[f];
-                classCounts[c]++;
-            }
-
-            float grandMean=0;
-            int totalValid=0;
-            for(int c=0; c < SCENT_CLASS_COUNT; c++){
-                if (classCounts[c] > 0) classMeans[c] /= classCounts[c];
-                grandMean += classMeans[c] * classCounts[c];
-                totalValid += classCounts[c];
-            }
-            if (totalValid > 0) grandMean /= totalValid;
-
-            for(int i=0; i < count; i++){
-                int c=samples[i].label;
-                if (c >= SCENT_CLASS_COUNT) continue;
-                float d=samples[i].features[f] - classMeans[c];
-                classVars[c] += d * d;
-            }
-
-            float betweenVar=0, withinVar=0;
-            for(int c=0; c < SCENT_CLASS_COUNT; c++){
-                if (classCounts[c] > 0){
-                    float d=classMeans[c] - grandMean;
-                    betweenVar += classCounts[c] * d * d;
-                    withinVar += classVars[c];
-                }
-            }
-
-            float fRatio=(withinVar > 1e-8f)
-                ? (betweenVar / (SCENT_CLASS_COUNT - 1)) / (withinVar / (totalValid - SCENT_CLASS_COUNT))
-                : 0.0f;
-
-            scores[f]={f, fRatio};
-        }
-
-        std::sort(scores.begin(), scores.end(),
-            [](const FeatureScore& a, const FeatureScore& b){
-                return a.score > b.score;
-            });
-
-        std::cout << "\n=== Feature Ranking (F-ratio) ===" << std::endl;
-        std::cout << "  [*]=selected, [ ]=dropped\n" << std::endl;
-
-        selectedIndices.clear();
-        for(int i=0; i < featureCount; i++){
-            bool selected=((int)selectedIndices.size() < maxFeatures && scores[i].score >= minFRatio);
-            if (selected) selectedIndices.push_back(scores[i].index);
-
-            std::cout << "  " << (selected ? "[*]" : "[ ]")
-                      << " F=" << std::setw(8) << std::fixed << std::setprecision(3)
-                      << scores[i].score
-                      << "  [" << std::setw(2) << scores[i].index << "] "
-                      << shortFeatureName(scores[i].index) << std::endl;
-        }
-
-        std::sort(selectedIndices.begin(), selectedIndices.end());
-        selectedCount=selectedIndices.size();
-
-        std::cout << "\nSelected " << selectedCount << "/" << featureCount << " features" << std::endl;
-    }
-
-    void selectFeaturesHybrid(const csv_training_sample_t *samples, uint16_t count, 
-                          int featureCount, int maxFeatures = 50) {
+    void selectFeaturesHybrid(const csv_training_sample_t *samples, uint16_t count,int featureCount, int maxFeatures, const std::set<int>& blacklist, bool verbose, bool applyMinScore = true) {
         originalCount = featureCount;
 
         struct FeatureScore {
@@ -504,7 +518,6 @@ struct FeatureSelector {
                     countB++;
                 }
             }
-            
             if(countA==0 ||countB==0){
                 return 0.0f;
             }
@@ -532,7 +545,10 @@ struct FeatureSelector {
         };
 
         for(int f=0; f<featureCount;f++){
-            scores[f].index=f;
+            scores[f] = {f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            if(blacklist.count(f)){
+                continue;
+            }
 
             {
                 float classMeans[SCENT_CLASS_COUNT]={0};
@@ -593,39 +609,18 @@ struct FeatureSelector {
 
         float maxG = 0.0f, maxT = 0.0f, maxC = 0.0f, maxX = 0.0f, maxTC = 0.0f;
         for(int f=0;f<featureCount;f++){
-            if(scores[f].globalF>maxG){
-                maxG = scores[f].globalF;
-            }
-            if(scores[f].teaPairF>maxT){
-                maxT = scores[f].teaPairF;
-            }
-
-            if(scores[f].coffeePairF>maxC){
-                maxC = scores[f].coffeePairF;
-            }
-            if(scores[f].crossPairF >maxX){
-                maxX = scores[f].crossPairF;
-            }
-            if(scores[f].teaCoffeeF >maxTC){
-                maxTC = scores[f].teaCoffeeF;
-            }
+            maxG = std::max(maxG, scores[f].globalF);
+            maxT = std::max(maxT, scores[f].teaPairF);
+            maxC = std::max(maxC, scores[f].coffeePairF);
+            maxX = std::max(maxX, scores[f].crossPairF);
+            maxTC = std::max(maxTC, scores[f].teaCoffeeF);
         }
 
-        if(maxG<1e-8f){
-            maxG = 1.0f;
-        }
-        if(maxT < 1e-8f){
-            maxT = 1.0f;
-        }
-        if(maxC < 1e-8f){
-            maxC = 1.0f;
-        }
-        if(maxX < 1e-8f){
-            maxX = 1.0f;
-        }
-        if(maxTC < 1e-8f){
-            maxTC = 1.0f;
-        }
+        if(maxG<1e-8f) maxG = 1.0f;
+        if(maxT < 1e-8f) maxT = 1.0f;
+        if(maxC < 1e-8f) maxC = 1.0f;
+        if(maxX < 1e-8f) maxX = 1.0f;
+        if(maxTC < 1e-8f) maxTC = 1.0f;
 
         for(int f = 0; f < featureCount; f++){
             float normG = scores[f].globalF / maxG;
@@ -637,73 +632,53 @@ struct FeatureSelector {
             //take max and average across 4 hard pairs
             float pairMax=std::max({normT,normC,normX,normTC});
             float pairAvg = (normT + normC + normX + normTC)/4.0f;
-            
-            //ensure pair representation
-            scores[f].score = 0.20f*normG+0.45f * pairMax+0.35f*pairAvg; 
+
+            scores[f].score = 0.20f*normG+0.45f * pairMax+0.35f*pairAvg;
         }
 
-        std::sort(scores.begin(), scores.end(),
+        //stable sort
+        std::stable_sort(scores.begin(), scores.end(),
             [](const FeatureScore& a, const FeatureScore& b){
                 return a.score > b.score;
         });
 
-        std::cout << "\n=== Hybrid Feature Ranking ===" << std::endl;
-        std::cout << "  [*]=selected, [ ]=dropped\n" << std::endl;
+        if(verbose){
+            std::cout << "\n=== Hybrid Feature Ranking ===" << std::endl;
+            std::cout << "  [*]=selected, [ ]=dropped\n" << std::endl;
+        }
 
         selectedIndices.clear();
-        float minScore = 0.05f;
+        const float minScore = 0.05f;
 
         for(int i = 0; i < featureCount; i++){
-            float normG = scores[i].globalF / maxG;
-            float normT = scores[i].teaPairF / maxT;
-            float normC = scores[i].coffeePairF / maxC;
-            float normX = scores[i].crossPairF / maxX;
-            float normTC = scores[i].teaCoffeeF / maxTC;
+            bool selected = ((int)selectedIndices.size() < maxFeatures&& (!applyMinScore || scores[i].score >= minScore) && !blacklist.count(scores[i].index));
 
-            bool selected = ((int)selectedIndices.size() < maxFeatures && scores[i].score >= minScore);
-            
             if(selected){
                 selectedIndices.push_back(scores[i].index);
             }
 
-            if(i < maxFeatures + 10) {
+            if(verbose&&i < maxFeatures + 10) {
                 std::cout << "  " << (selected ? "[*]" : "[ ]")
                         << " S=" << std::setw(6) << std::fixed << std::setprecision(3)
                         << scores[i].score
-                        << "(G=" << std::setprecision(2) << normG
-                        << " T=" << normT
-                        << " C=" << normC
-                        << " X=" << normX
-                        << " TC=" << normTC
+                        << "(G=" << std::setprecision(2) << scores[i].globalF / maxG
+                        << " T=" << scores[i].teaPairF / maxT
+                        << " C=" << scores[i].coffeePairF / maxC
+                        << " X=" << scores[i].crossPairF / maxX
+                        << " TC=" << scores[i].teaCoffeeF / maxTC
                         << ")  [" << std::setw(3) << scores[i].index << "] "
                         << shortFeatureName(scores[i].index) << std::endl;
             }
         }
 
-        int criticalFeats[] = {20, 21, 22, 23, 25, 30, 31, 70, 71, 12, 13, 52};
-        for(int cf:criticalFeats){
-            if(cf>=featureCount){
-                continue;
-            }
-
-            bool alreadySelected = false;
-            for(int si : selectedIndices){
-                if(si == cf){
-                    alreadySelected = true;
-                    break;
-                }
-            }
-            if(!alreadySelected&&(int)selectedIndices.size() < maxFeatures){
-                selectedIndices.push_back(cf);
-                std::cout<<"  [FORCED] feature " <<cf<< " (" << shortFeatureName(cf) << ")" << std::endl;
-            }
-        }
-
-        std::sort(selectedIndices.begin(), selectedIndices.end());
+        //kept in rank order
         selectedCount = selectedIndices.size();
-        std::cout << "\nSelected " << selectedCount << "/" << featureCount << " features" << std::endl;
-        std::cout << "Score maxima: G=" << std::setprecision(1) << maxG << " T=" << maxT << " C=" << maxC 
-                << " X=" << maxX << " TC=" << maxTC << std::endl;
+        if(verbose){
+            std::cout << "\nSelected " << selectedCount << "/" << featureCount << " features"
+                    << " (" << blacklist.size() << " blacklisted)" << std::endl;
+            std::cout << "Score maxima: G=" << std::setprecision(1) << maxG << " T=" << maxT << " C=" << maxC
+                    << " X=" << maxX << " TC=" << maxTC << std::endl;
+        }
     }
 
     void projectDataset(const csv_training_sample_t* src, uint16_t count,csv_training_sample_t* dst) const {
@@ -716,8 +691,9 @@ struct FeatureSelector {
         }
     }
 
-    void saveHeader(const char* filename, const float* medians, const float* iqrs)const {
+    void saveHeader(const std::string& filename, const float* medians, const float* iqrs,const std::string& note = "")const{
         std::ofstream f(filename);
+        if(!note.empty()) f << "// " << note << "\n";
         f << "#ifndef FEATURE_SELECT_H\n#define FEATURE_SELECT_H\n\n";
         f << "#define SELECTED_FEATURE_COUNT " << selectedCount << "\n";
         f << "#define ORIGINAL_FEATURE_COUNT " << originalCount << "\n\n";
@@ -731,14 +707,14 @@ struct FeatureSelector {
 
         f << "static const float SELECTED_MEDIANS[" << selectedCount << "]={";
         for(int i=0; i < selectedCount; i++){
-            f << std::setprecision(8) << medians[selectedIndices[i]];
+            f << std::setprecision(9) << medians[selectedIndices[i]];
             if (i < selectedCount - 1) f << ", ";
         }
         f << "};\n\n";
 
         f << "static const float SELECTED_IQRS[" << selectedCount << "]={";
         for(int i=0; i < selectedCount; i++){
-            f << std::setprecision(8) << iqrs[selectedIndices[i]];
+            f << std::setprecision(9) << iqrs[selectedIndices[i]];
             if (i < selectedCount - 1) f << ", ";
         }
         f << "};\n\n#endif\n";
@@ -828,134 +804,270 @@ void applyCostSensitiveWeighting(csv_training_sample_t*& trainSet, uint16_t& tra
     std::cout << "New training size: " << trainCount << std::endl;
 }
 
-//cross validation
-struct CVResults{
-    float meanAcc;
-    float stdAcc;
-    float foldAcc[10];
-    int foldCount;
-    ml_metrics_t aggregateMetrics;
+//===========================================================================================================
+//feature pipeline
+//===========================================================================================================
+struct FisherPair {
+    scent_class_t a, b;
+    const char* name;
+};
+static const FisherPair FISHER_PAIRS[] = {
+    {SCENT_CLASS_COFFEE, SCENT_CLASS_DECAF_TEA, "coffee_vs_dtea"},
+    {SCENT_CLASS_DECAF_TEA, SCENT_CLASS_TEA, "dtea_vs_tea"},
+    {SCENT_CLASS_DECAF_COFFEE, SCENT_CLASS_COFFEE, "dcoffee_vs_coffee"},
+    {SCENT_CLASS_DECAF_TEA, SCENT_CLASS_DECAF_COFFEE, "dtea_vs_dcoffee"}
+};
+static const int NUM_FISHER_PAIRS = 4;
+
+struct Pipeline {
+    int baseCount = 0;
+    int fullCount = 0;
+    int numFisher = 0;
+    int fisherPairIdx[NUM_FISHER_PAIRS] = {0};
+    float medians[CSV_FEATURE_COUNT] = {0};
+    float iqrs[CSV_FEATURE_COUNT] = {0};
+    float fisherW[NUM_FISHER_PAIRS][CSV_FEATURE_COUNT] = {{0}};
+    FeatureSelector selector;
 };
 
-CVResults crossValidateRF(csv_training_sample_t* allSamples, uint16_t totalCount,uint16_t featureCount, int numFolds,int numTrees, int maxDepth,int minSamples,float subsetRatio,const float* medians,const float* iqrs,const FeatureSelector& selector){
-    CVResults results={};
-    results.foldCount=numFolds;
-    memset(&results.aggregateMetrics, 0, sizeof(ml_metrics_t));
+static std::set<int> fisherExcluded(){
+    std::set<int> ex;
+    if(EXCLUDE_ENV_FROM_FISHER){
+        ex.insert(std::begin(ENV_RAW), std::end(ENV_RAW));
+    }
+    if(EXCLUDE_ENV_DERIVED){
+        ex.insert(std::begin(ENV_DERIVED), std::end(ENV_DERIVED));
+    }
+    return ex;
+}
 
-    std::vector<std::vector<uint16_t>> classIndices(SCENT_CLASS_COUNT);
-    for(uint16_t i=0; i<totalCount;i++){
-        if(allSamples[i].label< SCENT_CLASS_COUNT){
-            classIndices[allSamples[i].label].push_back(i);
+static std::set<int> selectionBlacklist(){
+    std::set<int> bl(std::begin(ENV_RAW), std::end(ENV_RAW));
+    if(EXCLUDE_ENV_DERIVED){
+        bl.insert(std::begin(ENV_DERIVED), std::end(ENV_DERIVED));
+    }
+    return bl;
+}
+
+static float fisherProject(const Pipeline& p, int k, const float* scaled){
+    float proj = 0.0f;
+    for(int f = 0; f < p.baseCount; f++){
+        proj += scaled[f] * p.fisherW[k][f];
+    }
+    return proj;
+}
+
+//fits the pipeline on samples
+static void fitPipeline(csv_training_sample_t* samples, uint16_t count, int baseCount, int nSelect,Pipeline& p, bool verbose, bool applyMinScore = true){
+    p.baseCount = baseCount;
+
+    //robust scaling of base + engineered features
+    robustScale(samples, count, baseCount, p.medians, p.iqrs);
+
+    //Fisher discriminant directions on the scaled features
+    std::set<int> excluded = fisherExcluded();
+    p.numFisher = 0;
+    for(int k = 0; k < NUM_FISHER_PAIRS; k++){
+        if(baseCount + p.numFisher >= CSV_FEATURE_COUNT){
+            break;
         }
-    }
+        const FisherPair& pr = FISHER_PAIRS[k];
 
-    std::mt19937 rng(1337);
-    for(int i=0; i<SCENT_CLASS_COUNT;i++){
-        std::shuffle(classIndices[i].begin(), classIndices[i].end(), rng);
-    }
-
-    std::vector<int> foldAssignment(totalCount, -1);
-    for(int i=0; i<SCENT_CLASS_COUNT;i++){
-        for(size_t j=0; j<classIndices[i].size();j++){
-            foldAssignment[classIndices[i][j]]=j % numFolds;
-        }
-    }
-
-    float totalAcc=0;
-    int totalCorrect=0, totalSamples=0;
-
-    for(int fold=0; fold<numFolds;fold++){
-        std::vector<csv_training_sample_t> trainFold, testFold;
-        for(uint16_t i=0; i<totalCount;i++){
-            if(foldAssignment[i]==fold){
-                testFold.push_back(allSamples[i]);
+        std::vector<double> meanA(baseCount, 0.0), meanB(baseCount, 0.0);
+        int nA = 0, nB = 0;
+        for(uint16_t i = 0; i < count; i++){
+            if(samples[i].label == pr.a){
+                for(int f = 0; f < baseCount; f++) meanA[f] += samples[i].features[f];
+                nA++;
             }
-            else{
-                trainFold.push_back(allSamples[i]);
+            else if(samples[i].label == pr.b){
+                for(int f = 0; f < baseCount; f++) meanB[f] += samples[i].features[f];
+                nB++;
             }
         }
-
-        if(trainFold.empty() || testFold.empty()){
+        if(nA == 0 || nB == 0){
             continue;
         }
-
-        //robust scaling per fold
-        float foldMedians[CSV_FEATURE_COUNT]={0};
-        float foldIQRs[CSV_FEATURE_COUNT]={0};
-
-        for(int f=0; f<featureCount; f++){
-            std::vector<float> vals(trainFold.size());
-
-            for(size_t i=0; i<trainFold.size(); i++){
-                vals[i] = trainFold[i].features[f];
-            }
-            std::sort(vals.begin(), vals.end());
-
-            foldMedians[f] = vals[vals.size() / 2];
-            float q1 =vals[vals.size()/ 4];
-            float q3 =vals[3 * vals.size() / 4];
-            foldIQRs[f]=q3 - q1;
-
-            if(foldIQRs[f]<1e-6f){
-                foldIQRs[f] = 1.0f;
-            }
+        for(int f = 0; f < baseCount; f++){
+            meanA[f] /= nA;
+            meanB[f] /= nB;
         }
 
-        for(auto &s: trainFold){
-            for(int f=0; f<featureCount; f++){
-                s.features[f] = (s.features[f] - foldMedians[f]) / foldIQRs[f];
+        float* w = p.fisherW[p.numFisher];
+        memset(w, 0, sizeof(float) * CSV_FEATURE_COUNT);
+        double norm = 0.0;
+        for(int f = 0; f < baseCount; f++){
+            if(excluded.count(f)){
+                continue;
             }
+            double varA = 0.0, varB = 0.0;
+            for(uint16_t i = 0; i < count; i++){
+                if(samples[i].label == pr.a){
+                    double d = samples[i].features[f] - meanA[f];
+                    varA += d * d;
+                }
+                else if(samples[i].label == pr.b){
+                    double d = samples[i].features[f] - meanB[f];
+                    varB += d * d;
+                }
+            }
+            double pooledStd = std::sqrt((varA / nA + varB / nB) / 2.0);
+            if(pooledStd > 1e-6){
+                w[f] = (float)((meanA[f] - meanB[f]) / pooledStd);
+            }
+            norm += (double)w[f] * w[f];
         }
-        
-        for(auto &s: testFold){
-            for(int f=0; f<featureCount; f++){
-                s.features[f] = (s.features[f] - foldMedians[f]) / foldIQRs[f];
-            }
+        norm = std::sqrt(norm);
+        if(norm < 1e-6){
+            continue;
         }
-
-        uint16_t selectedFeat= selector.selectedCount;
-        std::vector<csv_training_sample_t> trainProj(trainFold.size());
-        std::vector<csv_training_sample_t> testProj(testFold.size());
-        selector.projectDataset(trainFold.data(), trainFold.size(), trainProj.data());
-        selector.projectDataset(testFold.data(), testFold.size(), testProj.data());
-
-        uint16_t augTrainCount=trainProj.size();
-        csv_training_sample_t* augTrain=new csv_training_sample_t[augTrainCount];
-        memcpy(augTrain, trainProj.data(), augTrainCount * sizeof(csv_training_sample_t));
-
-        RandomForest rf(numTrees, maxDepth, minSamples, subsetRatio);
-        rf.train(augTrain, augTrainCount, selectedFeat);
-
-        ml_metrics_t m=rf.evaluate(testProj.data(), testProj.size());
-
-        results.foldAcc[fold]=m.accuracy;
-        totalAcc +=m.accuracy;
-        totalCorrect+=m.correct;
-        totalSamples+=m.total;
-
-        for(int i=0; i<SCENT_CLASS_COUNT;i++){
-            for(int j=0; j<SCENT_CLASS_COUNT;j++){
-                results.aggregateMetrics.confusionMatrix[i][j]+=m.confusionMatrix[i][j];
-            }
+        for(int f = 0; f < baseCount; f++){
+            w[f] = (float)(w[f] / norm);
         }
 
-        std::cout << "    Fold " << (fold + 1) << "/" << numFolds<< ": " << std::fixed << std::setprecision(1)
-        << (m.accuracy * 100) << "% (" << m.correct << "/" << m.total << ")"<< std::endl;
+        p.fisherPairIdx[p.numFisher] = k;
+        int newIdx = baseCount + p.numFisher;
 
-        delete[] augTrain;
+        for(uint16_t i = 0; i < count; i++){
+            samples[i].features[newIdx] = fisherProject(p, p.numFisher, samples[i].features);
+        }
+        p.numFisher++;
+
+        if(verbose){
+            std::cout << "  Fisher [" << newIdx << "]: " << pr.name << std::endl;
+        }
+    }
+    p.fullCount = baseCount + p.numFisher;
+
+    //Fisher outputs get their own median/IQR
+    for(int f = baseCount; f < p.fullCount; f++){
+        std::vector<float> vals(count);
+        for(uint16_t i = 0; i < count; i++){
+            vals[i] = samples[i].features[f];
+        }
+
+        std::sort(vals.begin(), vals.end());
+        p.medians[f] = vals[count / 2];
+        p.iqrs[f] = vals[3 * count / 4] - vals[count / 4];
+
+        if(p.iqrs[f] < 1e-6f){
+            p.iqrs[f] = 1.0f;
+        }
+
+        for(uint16_t i = 0; i < count; i++){
+            samples[i].features[f] = (samples[i].features[f] - p.medians[f]) / p.iqrs[f];
+        }
     }
 
-    results.meanAcc= totalAcc / numFolds;
-    results.aggregateMetrics.correct= totalCorrect;
-    results.aggregateMetrics.total= totalSamples;
-    results.aggregateMetrics.accuracy= (totalSamples > 0) ? ((float)totalCorrect / totalSamples) : 0.0f;
-
-    float varSum=0;
-    for(int i=0; i<numFolds;i++){
-        varSum+= (results.foldAcc[i] - results.meanAcc) * (results.foldAcc[i] - results.meanAcc);
+    if(verbose){
+        std::cout << "Total features with Fisher: " << p.fullCount << " (Fisher excludes " << excluded.size() << " environmental features)" << std::endl;
     }
-    results.stdAcc= sqrt(varSum / numFolds);
-    return results;
+
+    //hybrid selection
+    p.selector.selectFeaturesHybrid(samples, count, p.fullCount, nSelect, selectionBlacklist(), verbose, applyMinScore);
+}
+
+//applies a fitted pipeline to unseen samples
+static void applyPipeline(csv_training_sample_t* samples, uint16_t count, const Pipeline& p){
+    robustScaleApply(samples, count, p.baseCount, p.medians, p.iqrs);
+    for(uint16_t i = 0; i < count; i++){
+        for(int k = 0; k < p.numFisher; k++){
+            int f = p.baseCount + k;
+            float proj = fisherProject(p, k, samples[i].features);
+            samples[i].features[f] = (proj - p.medians[f]) / p.iqrs[f];
+        }
+    }
+}
+
+//===========================================================================================================
+//cross validation
+//===========================================================================================================
+struct Fold{
+    std::vector<csv_training_sample_t> train;
+    std::vector<csv_training_sample_t> test;
+    uint16_t featureCount = 0;
+};
+
+static std::vector<Fold> buildFolds(const csv_training_sample_t* engineered, uint16_t count, int baseCount,int nSelect, int numFolds, uint32_t seed){
+    std::vector<std::vector<uint16_t>> classIndices(SCENT_CLASS_COUNT);
+    for(uint16_t i = 0; i < count; i++){
+        if(engineered[i].label < SCENT_CLASS_COUNT){
+            classIndices[engineered[i].label].push_back(i);
+        }
+    }
+
+    std::mt19937 rng(seed);
+    std::vector<int> foldOf(count, -1);
+
+    for(int c = 0; c < SCENT_CLASS_COUNT; c++){
+        std::shuffle(classIndices[c].begin(), classIndices[c].end(), rng);
+
+        for(size_t j = 0; j < classIndices[c].size(); j++){
+            foldOf[classIndices[c][j]] = j % numFolds;
+        }
+    }
+
+    std::vector<Fold> folds(numFolds);
+
+    for(int k = 0; k < numFolds; k++){
+        std::vector<csv_training_sample_t> tr, te;
+
+        for(uint16_t i = 0; i < count; i++){
+            if(foldOf[i] == k) te.push_back(engineered[i]);
+            else if(foldOf[i] >= 0) tr.push_back(engineered[i]);
+        }
+
+        Pipeline fp;
+        fitPipeline(tr.data(), tr.size(), baseCount, nSelect, fp, false, false);
+        applyPipeline(te.data(), te.size(), fp);
+
+        folds[k].featureCount = fp.selector.selectedCount;
+        folds[k].train.resize(tr.size());
+        folds[k].test.resize(te.size());
+        fp.selector.projectDataset(tr.data(), tr.size(), folds[k].train.data());
+        fp.selector.projectDataset(te.data(), te.size(), folds[k].test.data());
+    }
+    return folds;
+}
+
+struct CVStat {
+    float mean = 0.0f;
+    float std = 0.0f;
+    ml_metrics_t agg;
+};
+
+//fn(fold) trains on fold.train and returns metrics on fold.test
+template<typename F>
+static CVStat runCV(const std::vector<Fold>& folds, F fn){
+    CVStat r;
+    memset(&r.agg, 0, sizeof(r.agg));
+    std::vector<float> accs;
+    for(const Fold& fold : folds){
+        ml_metrics_t m = fn(fold);
+        accs.push_back(m.accuracy);
+        r.agg.correct += m.correct;
+        r.agg.total += m.total;
+        for(int i = 0; i < SCENT_CLASS_COUNT; i++){
+            for(int j = 0; j < SCENT_CLASS_COUNT; j++){
+                r.agg.confusionMatrix[i][j] += m.confusionMatrix[i][j];
+            }
+        }
+    }
+
+    if(!accs.empty()){
+        r.mean = std::accumulate(accs.begin(), accs.end(), 0.0f) / accs.size();
+        float var = 0.0f;
+        for(float a : accs) var += (a - r.mean) * (a - r.mean);
+        r.std = std::sqrt(var / accs.size());
+    }
+    r.agg.accuracy = (r.agg.total > 0) ? (float)r.agg.correct / r.agg.total : 0.0f;
+    return r;
+}
+
+static std::string pct(float mean, float sd){
+    std::ostringstream o;
+    o << std::fixed << std::setprecision(1) << (mean * 100) << "% +/- " << (sd * 100) << "%";
+    return o.str();
 }
 
 
@@ -965,11 +1077,13 @@ void twoStageExperiment(const csv_training_sample_t* trainSet, uint16_t trainCou
 
     std::vector<csv_training_sample_t> s1_train, s1_test;
     for(int i=0; i <trainCount; i++){
+        if(trainSet[i].label == SCENT_CLASS_AMBIENT) continue;
         csv_training_sample_t s=trainSet[i];
         s.label=(s.label == SCENT_CLASS_DECAF_TEA || s.label == SCENT_CLASS_TEA)? (scent_class_t)0 : (scent_class_t)1;
         s1_train.push_back(s);
     }
     for(int i=0; i <testCount; i++){
+        if(testSet[i].label == SCENT_CLASS_AMBIENT) continue;
         csv_training_sample_t s=testSet[i];
         s.label=(s.label == SCENT_CLASS_DECAF_TEA || s.label == SCENT_CLASS_TEA)? (scent_class_t)0 : (scent_class_t)1;
         s1_test.push_back(s);
@@ -981,7 +1095,7 @@ void twoStageExperiment(const csv_training_sample_t* trainSet, uint16_t trainCou
     for(size_t i=0; i <s1_test.size(); i++){
         if (rf1.predict(s1_test[i].features) == s1_test[i].label) s1_correct++;
     }
-    std::cout <<"Stage 1 (tea-type vs coffee-type): "<<std::fixed <<std::setprecision(1)<<(100.0f * s1_correct / s1_test.size()) <<"%" <<std::endl;
+    std::cout <<"Stage 1 (tea-type vs coffee-type, beverages only): "<<std::fixed <<std::setprecision(1)<<(100.0f * s1_correct / s1_test.size()) <<"%" <<std::endl;
 
     auto runStage2=[&](scent_class_t classA, scent_class_t classB, const char* name){
         std::vector<csv_training_sample_t> s2_train, s2_test;
@@ -992,6 +1106,7 @@ void twoStageExperiment(const csv_training_sample_t* trainSet, uint16_t trainCou
                 s2_train.push_back(s);
             }
         }
+
         for(int i=0; i <testCount; i++){
             if(testSet[i].label == classA || testSet[i].label == classB){
                 csv_training_sample_t s=testSet[i];
@@ -1201,60 +1316,342 @@ struct HierarchicalClassifier {
         m.accuracy = (m.total > 0) ? (float)m.correct / m.total : 0.0f;
         mSoft.accuracy = (mSoft.total > 0) ? (float)mSoft.correct / mSoft.total : 0.0f;
         
-        std::cout << "  Stage 1 test acc: " << std::fixed << std::setprecision(1)<< (100.0f * s1_correct / testCount) << "%" << std::endl;
-        std::cout << "  Hard routing:  " << (m.accuracy * 100) << "%" << std::endl;
-        std::cout << "  Soft routing:  " << (mSoft.accuracy * 100) << "%" << std::endl;
-        
-        return (mSoft.accuracy > m.accuracy) ? mSoft : m;
+        int bevTotal = 0, bevHard = 0, bevSoft = 0, bevS1 = 0;
+        for(uint16_t i=0; i < testCount; i++){
+            if(testSet[i].label == SCENT_CLASS_AMBIENT) continue;
+            bevTotal++;
+            if(predict(testSet[i].features) == testSet[i].label) bevHard++;
+            if(predictSoft(testSet[i].features) == testSet[i].label) bevSoft++;
+            int actualGroup = (testSet[i].label == SCENT_CLASS_DECAF_TEA || testSet[i].label == SCENT_CLASS_TEA) ? 0 : 1;
+            if((int)stage1.predict(testSet[i].features) == actualGroup) bevS1++;
+        }
+        float bevDen = (bevTotal > 0) ? (float)bevTotal : 1.0f;
+
+        std::cout << "  Stage 1 test acc (beverages): " << std::fixed << std::setprecision(1)<< (100.0f * bevS1 / bevDen) << "%" << std::endl;
+        std::cout << "  Hard routing:  " << (m.accuracy * 100) << "% all, " << (100.0f * bevHard / bevDen) << "% beverages only" << std::endl;
+        std::cout << "  Soft routing:  " << (mSoft.accuracy * 100) << "% all, " << (100.0f * bevSoft / bevDen) << "% beverages only" << std::endl;
+        (void)s1_correct;
+
+        return m;
     }
 };
 
 //===========================================================================================================
 //weighted ensemble
 //===========================================================================================================
-scent_class_t ensemblePredict(const float* features,DecisionTree& dt, KNN& knn,RandomForest& rf,HierarchicalClassifier& hier, uint16_t featureCount,float dtWeight, float knnWeight,float rfWeight, float hierWeight) {
-    float classScores[SCENT_CLASS_COUNT] = {0};
+struct EnsembleWeights {
+    float dt, knn, rf;
+};
 
-    //KNN
-    float knnConf;
-    scent_class_t knnPred = knn.predictWithConfidence(features, featureCount, knnConf);
-    classScores[knnPred] += knnWeight * knnConf;
-    float knnResid = knnWeight * (1.0f-knnConf)/(SCENT_CLASS_COUNT - 1);
-    for(int c = 0; c<SCENT_CLASS_COUNT;c++){
-        if(c != knnPred){
-            classScores[c] += knnResid;
+static scent_class_t deployedEnsemble(const float* features, const DecisionTree& dt, const KNN& knn, const RandomForest& rf, uint16_t featureCount,const EnsembleWeights& w, float threshold, float* confOut=nullptr){
+    float dtConf = 0.0f, knnConf = 0.0f, rfConf = 0.0f;
+    int dtCls = dt.predictWithConfidence(features, dtConf);
+    int knnCls = knn.predictWithConfidence(features, featureCount, knnConf);
+    int rfCls = rf.predictWithConfidence(features, rfConf);
+
+    if(dtConf < threshold){
+        dtCls = SCENT_CLASS_UNKNOWN;
+        dtConf = 0.0f;
+    }
+
+    if(knnConf < threshold){
+        knnCls = SCENT_CLASS_UNKNOWN;
+        knnConf = 0.0f;
+    }
+    if(rfConf < threshold){
+        rfCls = SCENT_CLASS_UNKNOWN;
+        rfConf = 0.0f;
+    }
+
+    float scores[SCENT_CLASS_COUNT] = {0};
+    auto vote = [&](int cls, float conf, float weight){
+        if(cls >= SCENT_CLASS_COUNT) return;
+        scores[cls] += weight * conf;
+        float resid = weight * (1.0f - conf) / (SCENT_CLASS_COUNT - 1);
+        for(int c = 0; c < SCENT_CLASS_COUNT; c++){
+            if(c != cls){
+                scores[c] += resid;
+            }
+        }
+    };
+    vote(knnCls, knnConf, w.knn);
+    vote(rfCls, rfConf, w.rf);
+    vote(dtCls, dtConf, w.dt);
+
+    float bScore = 0.0f;
+    int bClass = SCENT_CLASS_UNKNOWN;
+    for(int c = 0; c < SCENT_CLASS_COUNT; c++){
+        if(scores[c] > bScore){
+            bScore = scores[c];
+            bClass = c;
         }
     }
 
-    //RF
-    float rfConf;
-    scent_class_t rfPred =rf.predictWithConfidence(features, rfConf);
-    classScores[rfPred]+=rfWeight*rfConf;
-    float rfResid=rfWeight * (1.0f-rfConf)/(SCENT_CLASS_COUNT - 1);
+    bool dtKnn = (dtCls == knnCls) && (dtCls != SCENT_CLASS_UNKNOWN);
+    bool knnRf = (knnCls == rfCls) && (knnCls != SCENT_CLASS_UNKNOWN);
+    bool dtRf = (dtCls == rfCls) && (dtCls != SCENT_CLASS_UNKNOWN);
+    if(!dtKnn && !knnRf && !dtRf){
+        if(confOut) *confOut = 0.0f;
+        return SCENT_CLASS_UNKNOWN;
+    }
+    float maxScore = w.dt + w.knn + w.rf;
+    float conf = (maxScore > 0.0f) ? bScore / maxScore : 0.0f;
+    if(confOut) *confOut = conf;
 
-    for(int c=0; c<SCENT_CLASS_COUNT;c++){
-        if(c!=rfPred){
-            classScores[c]+=rfResid;
+    if(conf < threshold){
+        return SCENT_CLASS_UNKNOWN;
+    }
+    return (scent_class_t)bClass;
+}
+
+struct RejectMetrics {
+    ml_metrics_t m;
+    int rejected = 0;
+    float coverage() const { return (m.total > 0) ? 1.0f - (float)rejected / m.total : 0.0f; }
+    float acceptedAcc() const { return (m.total - rejected > 0) ? (float)m.correct / (m.total - rejected) : 0.0f; }
+};
+
+template<typename P>
+static RejectMetrics evaluateWithReject(const csv_training_sample_t* set, uint16_t count, P predict){
+    RejectMetrics r;
+    memset(&r.m, 0, sizeof(r.m));
+    r.m.total = count;
+    for(uint16_t i = 0; i < count; i++){
+        scent_class_t actual = set[i].label;
+        scent_class_t pred = predict(set[i].features);
+        if(pred >= SCENT_CLASS_COUNT){
+            r.rejected++;
+            continue;
+        }
+        if(pred == actual) r.m.correct++;
+        if(actual < SCENT_CLASS_COUNT) r.m.confusionMatrix[actual][pred]++;
+    }
+    r.m.accuracy = (r.m.total > 0) ? (float)r.m.correct / r.m.total : 0.0f;
+    return r;
+}
+
+static void printReject(const char* name, const RejectMetrics& r){
+    std::cout << "  " << std::left << std::setw(18) << name << std::right << std::fixed << std::setprecision(1)
+              << "acc " << (r.m.accuracy * 100) << "%  coverage " << (r.coverage() * 100)
+              << "%  acc on accepted " << (r.acceptedAcc() * 100) << "%" << std::endl;
+}
+
+static void writeFisherHeader(const std::string& filename, const Pipeline& p){
+    std::ofstream f(filename);
+    f << "// Auto-generated Fisher projection weights\n";
+    f << "// Derived from the training partition + robust-scaled pre-Fisher features\n";
+    f << "// Feature space: first " << p.baseCount << " scaled features (indices 0.." << (p.baseCount - 1) << ")\n\n";
+    f << "#ifndef FISHER_WEIGHTS_H\n#define FISHER_WEIGHTS_H\n\n";
+    f << "#define FISHER_PAIR_COUNT " << p.numFisher << "\n";
+    f << "#define FISHER_BASE_FEATURE_COUNT " << p.baseCount << "\n\n";
+    f << "static const float FISHER_WEIGHTS[FISHER_PAIR_COUNT][FISHER_BASE_FEATURE_COUNT] = {\n";
+    for(int k = 0; k < p.numFisher; k++){
+        f << "    { // [" << k << "] " << FISHER_PAIRS[p.fisherPairIdx[k]].name << "\n";
+        for(int i = 0; i < p.baseCount; i++){
+            f << "        " << cFloat(p.fisherW[k][i])<< (i < p.baseCount - 1 ? "," : "") << "\n";
+        }
+        f << "    }" << (k < p.numFisher - 1 ? "," : "") << "\n";
+    }
+    f << "};\n\n#endif // FISHER_WEIGHTS_H\n";
+    std::cout << "Fisher weights saved to " << filename << std::endl;
+}
+
+static void writeStatsHeader(const std::string& filename, const Pipeline& p){
+    std::ofstream sf(filename);
+    sf << "#ifndef FEATURE_STATS_H\n#define FEATURE_STATS_H\n\n";
+    sf << "#define FULL_FEATURE_COUNT " << p.fullCount << "\n\n";
+    sf << "static const float FEATURE_MEDIANS[" << p.fullCount << "]={";
+    for(int f = 0; f < p.fullCount; f++){
+        sf << std::setprecision(9) << p.medians[f] << (f < p.fullCount - 1 ? ", " : "");
+    }
+    sf << "};\n\nstatic const float FEATURE_IQRS[" << p.fullCount << "]={";
+    for(int f = 0; f < p.fullCount; f++){
+        sf << std::setprecision(9) << p.iqrs[f] << (f < p.fullCount - 1 ? ", " : "");
+    }
+    sf << "};\n\n#endif\n";
+}
+
+static void writeKnnBinary(const std::string& filename, const csv_training_sample_t* samples, uint16_t count,uint8_t k, uint16_t featureCount){
+    std::ofstream file(filename, std::ios::binary);
+    const uint32_t magic = 0x4B4E4E4C;
+    const uint16_t version = 1;
+    file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    file.write(reinterpret_cast<const char*>(&k), sizeof(k));
+    file.write(reinterpret_cast<const char*>(&featureCount), sizeof(featureCount));
+    file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    for(uint16_t i = 0; i < count; i++){
+        uint8_t label = static_cast<uint8_t>(samples[i].label);
+        file.write(reinterpret_cast<const char*>(&label), sizeof(label));
+        file.write(reinterpret_cast<const char*>(samples[i].features), featureCount * sizeof(float));
+    }
+    std::cout << "KNN model saved to " << filename << " (" << featureCount << " features)" << std::endl;
+}
+
+//===========================================================================================================
+//Edge Impulse export
+//===========================================================================================================
+static std::string csvFeatureName(int rank, int idx){
+    std::string n = shortFeatureName(idx);
+    std::string out;
+    for(char c : n){
+        if(c == '*') out += "_x_";
+        else if(c == '/') out += "_per_";
+        else if(std::isalnum((unsigned char)c) || c == '_') out += c;
+        else out += '_';
+    }
+    std::ostringstream o;
+    o << "f" << std::setw(3) << std::setfill('0') << rank << "_" << out;
+    return o.str();
+}
+
+static void writeFeatureCsv(const std::string& filename, const csv_training_sample_t* samples, uint16_t count,const FeatureSelector& sel, int nFeatures){
+    std::ofstream f(filename);
+    f << "label";
+    for(int i = 0; i < nFeatures; i++){
+        f << "," << csvFeatureName(i, sel.selectedIndices[i]);
+    }
+    f << "\n" << std::setprecision(9);
+    for(uint16_t s = 0; s < count; s++){
+        f << CSVLoader::getClassName(samples[s].label);
+        for(int i = 0; i < nFeatures; i++){
+            f << "," << samples[s].features[i];
+        }
+        f << "\n";
+    }
+    std::cout << "Features exported to " << filename << " (" << count << " rows, " << nFeatures << " features)" << std::endl;
+}
+
+//===========================================================================================================
+//ambient gate
+//===========================================================================================================
+static const float AMBIENT_SCORE_SCALE = 0.15f;
+
+static void writeAmbientGateHeader(const std::string& filename, const CSVLoader& loader){
+    const std::vector<float>& cal = loader.getCalibrationDeviations();
+    const std::vector<float>& dev = loader.getGateDeviations();
+    std::cout << "\n=== Ambient Gate Calibration ===" << std::endl;
+    if(cal.empty()){
+        std::cout << "  No calibration sweeps, gate header not written" << std::endl;
+        return;
+    }
+
+    float calMax = *std::max_element(cal.begin(), cal.end());
+    float threshold = 1.5f * calMax;
+    bool usable = threshold < 0.9f * AMBIENT_SCORE_SCALE;
+    float scoreThreshold = usable ? 1.0f - threshold / AMBIENT_SCORE_SCALE : 1.0f; //1.0 = never fires
+
+    int n[SCENT_CLASS_COUNT] = {0}, gated[SCENT_CLASS_COUNT] = {0};
+    const csv_training_sample_t* samples = loader.getSamples();
+    for(size_t i = 0; i < dev.size(); i++){
+        int c = samples[i].label;
+        if(c >= SCENT_CLASS_COUNT){ 
+            continue;
+        }
+
+        n[c]++;
+        if(dev[i] < threshold){
+            gated[c]++;
         }
     }
 
-    //hierarchical
-    scent_class_t hierPred=hier.predictSoft(features);
-    if(hierPred !=SCENT_CLASS_AMBIENT){
-        classScores[hierPred]+=hierWeight*0.7f;
+    std::cout << "  Calibration sweeps: " << cal.size() << ", largest mean deviation " << std::fixed<< std::setprecision(1) << calMax * 100 << "%" << std::endl;
+    std::cout << "  Gate: mean deviation < " << threshold * 100 << "% (score > " << std::setprecision(3)<< scoreThreshold << ")" << (usable ? "" : "  -- too noisy, gate disabled") << std::endl;
+    for(int c = 0; c < SCENT_CLASS_COUNT; c++){
+        std::cout << "    " << std::setw(13) << CSVLoader::getClassName((scent_class_t)c) << ": " << gated[c] << "/" << n[c]<< " sweeps would be gated as ambient" << std::endl;
     }
 
-    //DT
-    scent_class_t dtPred=dt.predict(features);
-    classScores[dtPred]+=dtWeight * 0.3f;
+    std::ofstream f(filename);
+    f << "#ifndef AMBIENT_GATE_H\n#define AMBIENT_GATE_H\n\n";
+    f << "// ambient gate: report ambient without classifying if computeAmbientScore() > AMBIENT_GATE_SCORE\n";
+    f << "// score = 1 - min(mean |R/R_base - 1| / " << AMBIENT_SCORE_SCALE << ", 1); threshold = 1.5 x the largest mean\n";
+    f << "// deviation of the " << cal.size() << " calibration sweeps (" << std::setprecision(4) << calMax << ")\n";
+    
+    if(!usable) f << "// calibration sweeps too noisy for a useful gate: 1.0 disables it\n";
+    
+    f << "#define AMBIENT_GATE_MAX_DEVIATION " << cFloat(threshold) << "\n";
+    f << "#define AMBIENT_GATE_SCORE " << cFloat(scoreThreshold) << "\n";
+    f << "\n#endif\n";
+    std::cout << "Ambient gate saved to " << filename << std::endl;
+}
 
-    return (scent_class_t)(std::distance(classScores,std::max_element(classScores, classScores+SCENT_CLASS_COUNT)));
+static void printUsage(){
+    std::cout << "Usage: ml_trainer [data.csv] [trainRatio] [--features N|auto] [--max-features N] [--feature-step N]\n" << "                  [--seed N] [--split random|session] [--out DIR] [--quick] [--exclude-env-derived] [--export-only]" << std::endl;
 }
 
 
 int main(int argc, char* argv[]){
-    std::ofstream logFile("training_output.txt");
-    
+    //===========================================================================================================
+    //arguments
+    //===========================================================================================================
+    std::string filename="data.csv";
+    {
+        int positional = 0;
+        for(int i = 1; i < argc; i++){
+            std::string a = argv[i];
+            auto next = [&](const char* flag) -> std::string {
+                if(i + 1 >= argc){
+                    std::cerr << "Missing value for " << flag << std::endl;
+                    exit(1);
+                }
+                return argv[++i];
+            };
+            if(a == "--features"){
+                std::string v = next("--features");
+                NUM_SELECTED_FEATURES = (v == "auto") ? 0 : std::stoi(v);
+            }
+            else if(a == "--max-features"){
+                MAX_SELECTED_FEATURES = std::stoi(next("--max-features"));
+            }
+            else if(a == "--feature-step"){
+                FEATURE_STEP = std::max(1, std::stoi(next("--feature-step")));
+            }
+            else if(a == "--seed"){
+                RANDOM_SEED = (uint32_t)std::stoul(next("--seed"));
+            }
+            else if(a == "--split"){
+                SESSION_SPLIT = (next("--split") == "session");
+            }
+            else if(a == "--out"){
+                OUTPUT_DIR = next("--out");
+            }
+            else if(a == "--quick"){
+                QUICK_RF_GRID = true;
+            }
+            else if(a == "--no-sweep") {}
+            else if(a == "--exclude-env-derived"){
+                EXCLUDE_ENV_DERIVED = true;
+            }
+            else if(a == "--export-only"){
+                EXPORT_ONLY = true;
+            }
+            else if(a == "--help" || a == "-h"){
+                printUsage();
+                return 0;
+            }
+            else if(a.rfind("--", 0) == 0){
+                std::cerr << "Unknown option " << a << std::endl; printUsage();
+                return 1;
+            }
+            else if(positional == 0){
+                filename = a;
+                positional++;
+            }
+            else if(positional == 1){
+                TRAIN_RATIO = std::stof(a);
+                positional++;
+            }
+        }
+        if(NUM_SELECTED_FEATURES < 0 || NUM_SELECTED_FEATURES > 157 || MAX_SELECTED_FEATURES < 0){
+            std::cerr << "--features must be auto or between 1 and 157" << std::endl;
+            return 1;
+        }
+        std::filesystem::create_directories(OUTPUT_DIR);
+    }
+
+    std::ofstream logFile(outPath("training_output.txt"));
+
     class TeeBuf : public std::streambuf {
     public:
         TeeBuf(std::streambuf* sb1, std::streambuf* sb2) : sb1(sb1), sb2(sb2) {}
@@ -1282,16 +1679,26 @@ int main(int argc, char* argv[]){
     TeeBuf teeErrBuf(std::cerr.rdbuf(), logFile.rdbuf());
     std::streambuf* originalErrBuf = std::cerr.rdbuf(&teeErrBuf);
 
+    RandomForest::setSeed(RANDOM_SEED);
+
     std::cout <<"========================================" <<std::endl;
     std::cout <<"    Machine Learning Model Trainer" <<std::endl;
     std::cout <<"========================================" <<std::endl;
-
-    std::string filename="data.csv";
-    float trainRatio=0.8f;
-    if (argc > 1) filename=argv[1];
-    if (argc > 2) trainRatio=std::stof(argv[2]);
-    std::cout <<"\nLoading: " << filename << std::endl;
-    std::cout << "Train/Test split: " << (trainRatio * 100) << "/"<< ((1 - trainRatio) * 100) << std::endl;
+    std::cout << "\nLoading: " << filename << std::endl;
+    if(NUM_SELECTED_FEATURES > 0){
+        std::cout << "Features: " << NUM_SELECTED_FEATURES << " for every model" << std::endl;
+    }
+    else{
+        std::cout << "Features: chosen per model by CV (" << MIN_SEARCH_FEATURES << " to "
+                  << (MAX_SELECTED_FEATURES > 0 ? std::to_string(MAX_SELECTED_FEATURES) : std::string("all eligible"))
+                  << ", step " << FEATURE_STEP << ")" << std::endl;
+    }
+    std::cout << "Split: " << (SESSION_SPLIT ? "session-wise" : "stratified random") << " "
+              << (TRAIN_RATIO * 100) << "/" << ((1 - TRAIN_RATIO) * 100) << ", seed " << RANDOM_SEED << std::endl;
+    std::cout << "RF grid: " << (QUICK_RF_GRID ? "quick" : "full") << ", CV folds: " << CV_FOLDS << std::endl;
+    std::cout << "Env features: raw excluded from selection" << (EXCLUDE_ENV_FROM_FISHER ? " and Fisher" : "")
+              << (EXCLUDE_ENV_DERIVED ? "; env-derived features excluded" : "; env-derived features allowed") << std::endl;
+    std::cout << "Output directory: " << OUTPUT_DIR << std::endl;
 
     CSVLoader loader;
     if(!loader.load(filename)){
@@ -1301,11 +1708,12 @@ int main(int argc, char* argv[]){
 
     loader.printInfo();
     CSVLoader::printFeatureNames();
+    writeAmbientGateHeader(outPath("ambient_gate.h"), loader);
 
     //split
     csv_training_sample_t *trainSet=nullptr, *testSet=nullptr;
     uint16_t trainCount=0,testCount=0;
-    loader.split(trainRatio,trainSet,trainCount,testSet,testCount);
+    loader.split(TRAIN_RATIO, RANDOM_SEED, SESSION_SPLIT, trainSet, trainCount, testSet, testCount);
 
     //===========================================================================================================
     //feature engineering
@@ -1317,258 +1725,70 @@ int main(int argc, char* argv[]){
         addEngineeredFeatures(testSet,testCount,BASE_FEATURE_COUNT);
     }
 
-    //===========================================================================================================
-    //robust scaling
-    //===========================================================================================================
-    float feature_medians[CSV_FEATURE_COUNT]={0};
-    float feature_iqrs[CSV_FEATURE_COUNT]={0};
+    //unscaled copies: training partition for cross-validation, holdout for the device parity check
+    std::vector<csv_training_sample_t> trainEngineered(trainSet, trainSet + trainCount);
+    std::vector<csv_training_sample_t> testEngineered(testSet, testSet + testCount);
 
+    //===========================================================================================================
+    //scaling, Fisher projections and feature selection
+    //===========================================================================================================
+    Pipeline pipe;
     {
-        Timer t("Robust Scaling");
-        robustScale(trainSet, trainCount, engineeredFeatureCount, feature_medians, feature_iqrs);
-        robustScaleApply(testSet, testCount, engineeredFeatureCount, feature_medians, feature_iqrs);
-    }
-
-    //===========================================================================================================
-    //fisher discriminant features
-    //===========================================================================================================
-    float fisherWeights[4][CSV_FEATURE_COUNT]={{0}};
-    int numFisherPairs=0;
-    int fisherBaseFeat=0;
-
-    int preFisherFeatureCount = engineeredFeatureCount;
-    {
-        Timer t("Fisher Features");
+        Timer t("Scaling, Fisher Features and Selection");
         std::cout << std::endl;
-        
-        struct ClassPair {
-            scent_class_t a, b;
-            const char* name;
-        };
-        ClassPair pairs[] = {
-            {SCENT_CLASS_COFFEE, SCENT_CLASS_DECAF_TEA, "coffee_vs_dtea"},
-            {SCENT_CLASS_DECAF_TEA, SCENT_CLASS_TEA, "dtea_vs_tea"},
-            {SCENT_CLASS_DECAF_COFFEE, SCENT_CLASS_COFFEE, "dcoffee_vs_coffee"},
-            {SCENT_CLASS_DECAF_TEA, SCENT_CLASS_DECAF_COFFEE, "dtea_vs_dcoffee"}
-        };
-        int numPairs=4;
-        int baseFeat=engineeredFeatureCount;
-        fisherBaseFeat=baseFeat;
-        
-        for(int p=0;p<numPairs;p++){
-            if(engineeredFeatureCount>=CSV_FEATURE_COUNT-1){
-                break;
-            }
-            
-            float meanA[CSV_FEATURE_COUNT] = {0};
-            float meanB[CSV_FEATURE_COUNT] = {0};
-            int nA= 0,nB=0;
-            
-            for(uint16_t i =0;i<trainCount;i++){
-                if(trainSet[i].label==pairs[p].a){
-                    for(int f=0;f<baseFeat;f++){
-                        meanA[f]+=trainSet[i].features[f];
-                    }
-                    nA++;
-                }
+        int requested = (NUM_SELECTED_FEATURES > 0) ? NUM_SELECTED_FEATURES: (MAX_SELECTED_FEATURES > 0) ? MAX_SELECTED_FEATURES : CSV_FEATURE_COUNT;
+        fitPipeline(trainSet, trainCount, engineeredFeatureCount, requested, pipe, true);
+        applyPipeline(testSet, testCount, pipe);
 
-                else if(trainSet[i].label==pairs[p].b){
-                    for(int f=0;f<baseFeat;f++){
-                        meanB[f] += trainSet[i].features[f];
-                    }
-                    nB++;
-                }
-            }
-            if(nA == 0||nB == 0){
-                continue;
-            }
-
-            for(int f = 0; f<baseFeat;f++){
-                meanA[f] /=nA;
-                meanB[f] /=nB;
-            }
-            
-            float weights[CSV_FEATURE_COUNT] = {0};
-            float norm = 0;
-            for(int f=0; f< baseFeat; f++){
-                float varA = 0, varB = 0;
-
-                for(uint16_t i=0; i<trainCount;i++){
-                    if(trainSet[i].label==pairs[p].a){
-                        float d = trainSet[i].features[f]-meanA[f];
-                        varA += d * d;
-                    }
-                    else if(trainSet[i].label==pairs[p].b){
-                        float d = trainSet[i].features[f]-meanB[f];
-                        varB += d * d;
-                    }
-                }
-
-                float pooled_std = sqrtf((varA/nA + varB/nB) / 2.0f);
-                if(pooled_std>1e-6f){
-                    weights[f]=(meanA[f]-meanB[f]) /pooled_std;
-                }
-                norm+=weights[f]*weights[f];
-            }
-
-            norm=sqrtf(norm);
-            if(norm < 1e-6f){
-                continue;
-            }
-
-            for(int f = 0; f < baseFeat; f++){
-                weights[f] /= norm;
-            }
-            
-            memcpy(fisherWeights[numFisherPairs], weights, sizeof(float)*baseFeat);
-            numFisherPairs++;
-
-            int newIdx=engineeredFeatureCount;
-            for(uint16_t i=0; i<trainCount;i++){
-                float proj = 0;
-
-                for(int f =0; f < baseFeat; f++){
-                    proj += trainSet[i].features[f] * weights[f];
-                }
-
-                trainSet[i].features[newIdx] = proj;
-            }
-            for(uint16_t i = 0; i < testCount; i++){
-                float proj = 0;
-
-                for(int f=0; f<baseFeat;f++){
-                    proj+=testSet[i].features[f] * weights[f];
-                }
-                testSet[i].features[newIdx]=proj;
-            }
-
-            engineeredFeatureCount++;
-            std::cout<< "  Fisher [" << newIdx << "]: " <<pairs[p].name << std::endl;
-        }
-        std::cout << "Total features with Fisher: " << engineeredFeatureCount << std::endl;
-        std::cout << "Selectable features (pre-Fisher): " << preFisherFeatureCount << std::endl;
-    }
-
-    {
-        int fisherStart=preFisherFeatureCount;
-        int fisherEnd=engineeredFeatureCount;
-        
-        for(int f=fisherStart;f<fisherEnd;f++){
-            std::vector<float> vals(trainCount);
-
-            for(uint16_t i=0; i<trainCount; i++){
-                vals[i]=trainSet[i].features[f];
-            }
-
-            std::sort(vals.begin(), vals.end());
-            
-            feature_medians[f] =vals[trainCount/2];
-            float q1=vals[trainCount/4];
-            float q3=vals[3*trainCount/4];
-            feature_iqrs[f] =q3-q1;
-            if(feature_iqrs[f]< 1e-6f) feature_iqrs[f]=1.0f;
-            
-            //train
-            for(uint16_t i = 0; i < trainCount; i++){
-                trainSet[i].features[f]=(trainSet[i].features[f]-feature_medians[f])/feature_iqrs[f];
-            }
-
-            //test
-            for(uint16_t i =0;i< testCount;i++){
-                testSet[i].features[f]=(testSet[i].features[f]-feature_medians[f])/feature_iqrs[f];
-            }
-        }
-        
-        std::cout << "Normalized " << (fisherEnd - fisherStart)<< " Fisher features (indices "<< fisherStart<< ".."<<(fisherEnd - 1) << ")" << std::endl;
-    }
-
-    //save
-    {
-        std::ofstream sf("feature_stats.h");
-        sf << "#ifndef FEATURE_STATS_H\n#define FEATURE_STATS_H\n\n";
-        sf << "#define FULL_FEATURE_COUNT " << engineeredFeatureCount << "\n\n";
-        sf << "static const float FEATURE_MEDIANS[" << engineeredFeatureCount << "]={";
-
-        for(int f=0; f < engineeredFeatureCount; f++){
-            sf <<std::setprecision(8) << feature_medians[f];
-            if(f<engineeredFeatureCount-1){
-                sf << ", ";
-            }
-        }
-
-        sf << "};\n\nstatic const float FEATURE_IQRS[" << engineeredFeatureCount << "]={";
-
-        for(int f=0; f < engineeredFeatureCount; f++){
-            sf <<std::setprecision(8) << feature_iqrs[f];
-            if(f<engineeredFeatureCount-1){
-                sf << ", ";
-            }
-        }
-        sf << "};\n\n#endif\n";
-    }
-
-    FeatureSelector selector;
-    {
-        Timer t("Feature Selection (hybrid)");
-
-        //temp1, hum1, pres1, temp2, hum2, pres2
-        std::vector<int> envBlacklist={76, 77, 78, 79, 80, 81};
-
-        //count how many are within range
-        int blacklistCount = 0;
-        for(int idx:envBlacklist){
-            if(idx<preFisherFeatureCount){
-                blacklistCount++;
-            }
-        }
-
-        std::cout<<"\nBlacklisting " << blacklistCount << " environmental features from selection" << std::endl;
-        std::cout<<"Selecting from " << (preFisherFeatureCount - blacklistCount) << " effective features" << std::endl;
-m
-        std::vector<std::vector<float>> savedVals( trainCount,std::vector<float>(envBlacklist.size(),0.0f));
-
-        for(uint16_t i=0; i<trainCount; i++){
-            for(size_t j=0; j <envBlacklist.size();j++){
-                int idx = envBlacklist[j];
-
-                if(idx < preFisherFeatureCount){
-                    savedVals[i][j]=trainSet[i].features[idx];
-                    trainSet[i].features[idx]=0.0f;
-                }
-            }
-        }
-
-        //run selection
-        selector.selectFeaturesHybrid(trainSet, trainCount, engineeredFeatureCount, 50);
-
-        //restore
-        for(uint16_t i = 0; i < trainCount; i++){
-            for(size_t j = 0; j < envBlacklist.size(); j++){
-                int idx = envBlacklist[j];
-                if(idx < preFisherFeatureCount){
-                    trainSet[i].features[idx]=savedVals[i][j];
-                }
-            }
-        }
-
-        //verify
+        std::set<int> blacklist = selectionBlacklist();
         int envSelected = 0;
-        std::set<int> blacklistSet(envBlacklist.begin(), envBlacklist.end());
-        for(int i = 0; i < selector.selectedCount; i++){
-            if(blacklistSet.count(selector.selectedIndices[i])>0){
-                std::cout << "  WARNING: env feature " << selector.selectedIndices[i] << " was still selected!" << std::endl;
-                
-                envSelected++;
-            }
+        for(int idx : pipe.selector.selectedIndices){
+            if(blacklist.count(idx)) envSelected++;
         }
-
-        std::cout << "  Env features in final selection: " << envSelected<<"/"<<selector.selectedCount<<std::endl;
+        std::cout << "  Blacklisted features in final selection: " << envSelected << "/" << pipe.selector.selectedCount << std::endl;
     }
 
-    selector.saveHeader("feature_select.h", feature_medians, feature_iqrs);
-    uint16_t reducedFeatureCount = selector.selectedCount;
+    const int maxFeatures = pipe.selector.selectedCount;
+    const int fullFeatureCount = pipe.fullCount;
 
-    //batch effect 
+    //feature counts searched per model
+    std::vector<int> featureCounts;
+    if(NUM_SELECTED_FEATURES > 0){
+        featureCounts.push_back(maxFeatures);
+    }
+    else{
+        for(int n = std::min(MIN_SEARCH_FEATURES, maxFeatures); n < maxFeatures; n += FEATURE_STEP){
+            featureCounts.push_back(n);
+        }
+        featureCounts.push_back(maxFeatures);
+    }
+    std::cout << "\nFeature ranking (selected features are stored best-first; a model using N features reads the first N):" << std::endl;
+    for(int i = 0; i < maxFeatures; i++){
+        int idx = pipe.selector.selectedIndices[i];
+        std::cout << "  [" << std::setw(3) << i << "] " << std::setw(3) << idx << " " << shortFeatureName(idx) << std::endl;
+    }
+    std::cout << "Feature counts searched per model:";
+    for(int n : featureCounts) std::cout << " " << n;
+    std::cout << std::endl;
+
+    if(EXPORT_ONLY){
+        //every ranked feature
+        std::vector<csv_training_sample_t> tr(trainCount), te(testCount);
+        pipe.selector.projectDataset(trainSet, trainCount, tr.data());
+        pipe.selector.projectDataset(testSet, testCount, te.data());
+        std::cout << std::endl;
+        writeFeatureCsv(outPath("features_train.csv"), tr.data(), trainCount, pipe.selector, maxFeatures);
+        writeFeatureCsv(outPath("features_test.csv"), te.data(), testCount, pipe.selector, maxFeatures);
+        delete[] trainSet;
+        delete[] testSet;
+        std::cout.rdbuf(originalBuf);
+        std::cerr.rdbuf(originalErrBuf);
+        logFile.close();
+        std::cout << "\nExport complete; output saved to " << outPath("training_output.txt") << std::endl;
+        return 0;
+    }
+
+    //batch effect
     std::cout << "\nChecking for batch effects..." << std::endl;
 
     for(int i=0; i<SCENT_CLASS_COUNT;i++){
@@ -1589,7 +1809,7 @@ m
         int checkFeat[] ={20, 21, 22, 23, 25, 27, 30, 31, 33, 35, 37, 42, 47, 70, 71};
 
         for(int f:checkFeat){
-            if(f>= engineeredFeatureCount){
+            if(f>= fullFeatureCount){
                 continue;
             }
 
@@ -1614,10 +1834,10 @@ m
 
     std::cout << "\n=== Coffee vs Decaf_Tea Feature Analysis ===" << std::endl;
     int goodFeats = 0;
-    for(int f = 0; f < engineeredFeatureCount; f++){
+    for(int f = 0; f < fullFeatureCount; f++){
         float mean_coffee = 0,mean_dtea = 0, var_coffee=0, var_dtea = 0;
         int n_coffee = 0,n_dtea = 0;
-        
+
         for(int i = 0; i<trainCount;i++){
             if(trainSet[i].label==SCENT_CLASS_COFFEE){
                 mean_coffee+=trainSet[i].features[f];
@@ -1633,7 +1853,7 @@ m
         }
         mean_coffee/=n_coffee;
         mean_dtea/=n_dtea;
-        
+
         for(int i=0; i<trainCount;i++){
             if(trainSet[i].label==SCENT_CLASS_COFFEE){
                 float d=trainSet[i].features[f]-mean_coffee;
@@ -1646,10 +1866,10 @@ m
         }
         var_coffee/=n_coffee;
         var_dtea/=n_dtea;
-        
+
         float pooled_std = sqrtf((var_coffee + var_dtea) / 2.0f);
         float separation = (pooled_std > 1e-6f)? fabsf(mean_coffee - mean_dtea)/pooled_std: 0.0f;
-        
+
         if(separation > 0.3f){
             goodFeats++;
             std::cout << "  [" << std::setw(3) << f << "] "<< std::setw(16) << shortFeatureName(f)<< " sep=" << std::fixed << std::setprecision(2) << separation
@@ -1657,371 +1877,246 @@ m
         }
     }
 
-    std::cout << "\nFeatures with separation > 0.3: "<< goodFeats<<"/"<<engineeredFeatureCount<<std::endl;
-    
-    if(goodFeats<5){
-        std::cout <<"WARNING: Very few discriminative features between coffee and decaf_tea!"<<std::endl;
-        std::cout <<"  -> Sensors may produce genuinely similar readings for these classes"<<std::endl;
-        std::cout <<"  -> Consider collecting paired A/B data under varied conditions"<<std::endl;
-    }
-    else if(goodFeats<15){
-        std::cout << "MODERATE: Some signal exists but is weak. More engineered features may help." << std::endl;
-    }
-    else {
-        std::cout << "GOOD: Signal exists. Model tuning should improve separation." << std::endl;
-    }
+    std::cout << "\nFeatures with separation > 0.3: "<< goodFeats<<"/"<<fullFeatureCount<<std::endl;
 
     //===========================================================================================================
-    //feature count sweeep
+    //project to the ranked selection
     //===========================================================================================================
-    {
-        std::cout << "\n=== Feature Count Sweep ===" << std::endl;
-        
-        std::streambuf* origBuf = std::cout.rdbuf();
-        std::ostringstream nullStream;
-        
-        for(int maxF:{10,15,20,25,30,35,40,45,50}){
-            std::cout.rdbuf(nullStream.rdbuf());
-            FeatureSelector testSel;
-            testSel.selectFeaturesHybrid(trainSet, trainCount, engineeredFeatureCount, maxF);
-            std::cout.rdbuf(origBuf);
-            
-            csv_training_sample_t* tmpTrain=new csv_training_sample_t[trainCount];
-            csv_training_sample_t* tmpTest=new csv_training_sample_t[testCount];
-            testSel.projectDataset(trainSet,trainCount,tmpTrain);
-            testSel.projectDataset(testSet,testCount,tmpTest);
-            
-            //KNN
-            KNN tmpKnn;
-            tmpKnn.train(tmpTrain,trainCount);
-            tmpKnn.setK(5);
-            ml_metrics_t mKnn=tmpKnn.evaluate(tmpTest, testCount);
-            
-            //RF
-            RandomForest tmpRf(100,6,10,0.3f);
-            tmpRf.train(tmpTrain,trainCount, testSel.selectedCount);
-            ml_metrics_t mRf=tmpRf.evaluate(tmpTest, testCount);
-            
-            std::cout << "  Features=" << std::setw(2) << testSel.selectedCount 
-                    <<" (requested " << maxF << ")"<<" -> KNN: " << std::fixed<<std::setprecision(1)
-                    <<(mKnn.accuracy * 100) << "%"<<"  RF: " << (mRf.accuracy * 100)<<"%" << std::endl;
-            
-            delete[] tmpTrain;
-            delete[] tmpTest;
-        }
-        std::cout<<std::endl;
-    }
-
-
-
-
     csv_training_sample_t* trainReduced=new csv_training_sample_t[trainCount];
     csv_training_sample_t* testReduced=new csv_training_sample_t[testCount];
-    selector.projectDataset(trainSet, trainCount,trainReduced);
-    selector.projectDataset(testSet, testCount,testReduced);
-
-
-    csv_training_sample_t* trainFull=trainSet;
-    csv_training_sample_t* testFull=testSet;
+    pipe.selector.projectDataset(trainSet, trainCount,trainReduced);
+    pipe.selector.projectDataset(testSet, testCount,testReduced);
+    delete[] trainSet;
+    delete[] testSet;
     trainSet=trainReduced;
     testSet=testReduced;
 
-    std::cout << "\nTraining with " << reducedFeatureCount << " selected features" << std::endl;
-
-    //experiment
-    twoStageExperiment(trainSet, trainCount, testSet, testCount, reducedFeatureCount);
-
-    //===========================================================================================================
-    //hierarchical classifier
-    //===========================================================================================================
-    HierarchicalClassifier hier;
-    ml_metrics_t hierMetrics;
+    //CV folds used for search
+    std::vector<Fold> folds;
     {
-        Timer t("Hierarchical Classifier");
-        std::cout << std::endl;
-
-        hier.train(trainSet,trainCount,reducedFeatureCount);
-        hierMetrics = hier.evaluate(testSet, testCount);
-
-        printMetrics(hierMetrics,"Hierarchical Classifier");
-        printPerClassMetrics(hierMetrics);
-        printConfusionMatrix(hierMetrics);
-    }
-
-    csv_training_sample_t* knnTrainSet=new csv_training_sample_t[trainCount];
-    uint16_t knnTrainCount=trainCount;
-    memcpy(knnTrainSet, trainSet, trainCount * sizeof(csv_training_sample_t));
-
-    //aug
-    bool useAugmentation=false; //leave off for now
-
-    if(useAugmentation){
-        Timer t("Data Augmentation");
-        std::default_random_engine rng(42);
-        augmentTrainingData(trainSet, trainCount, reducedFeatureCount, rng);
-
-        std::cout << "Augmented: " << trainCount << " samples" << std::endl;
-        for(int c=0; c < SCENT_CLASS_COUNT; c++){
-            int cnt=0;
-
-            for(int j=0; j < trainCount; j++){
-                if (trainSet[j].label == c){
-                    cnt++;
-                }
-            }
-            std::cout << "  " << CSVLoader::getClassName((scent_class_t)c) << ": " << cnt << std::endl;
+        Timer t("Building CV folds");
+        folds = buildFolds(trainEngineered.data(), trainCount, engineeredFeatureCount,maxFeatures, CV_FOLDS, RANDOM_SEED);
+        
+        int minFold = maxFeatures;
+        for(const Fold& f : folds) minFold = std::min<int>(minFold, f.featureCount);
+        if(minFold < maxFeatures){
+            std::cout << "\nNOTE: one fold selected only " << minFold << " features (score threshold);"<< " larger counts read zeros there" << std::endl;
         }
     }
-    else{
-        std::cout << "\nData augmentation skipped" << std::endl;
+    if(SESSION_SPLIT){
+        std::cout << "NOTE: CV folds are drawn at random within the training runs, so CV accuracy is within-session" << std::endl;
     }
+
+    std::ofstream gridCsv(outPath("search_grid.csv"));
+    gridCsv << "model,features,p1,p2,p3,p4,cv_mean,cv_std\n" << std::fixed << std::setprecision(4);
+    std::ofstream countCsv(outPath("feature_count_search.csv"));
+    countCsv << "model,features,best_cv_mean,best_cv_std,best_params\n" << std::fixed << std::setprecision(4);
 
     //========================================================
     //Decision Tree
     //========================================================
+    int dtFeat = 0;
+    uint8_t finalDTDepth=0, finalDTMinSamples=0;
+    CVStat dtCV;
     {
-        Timer t("Decision Tree Grid Search");
-
-        std::cout << std::endl;
-        uint8_t bestDTDepth=0, bestDTMinSamples=0;
-        float bestDTAcc=0.0f;
-
-        for(uint8_t d=6; d <= 14; d += 2){
-            for(uint8_t ms : {5, 10, 20, 30}){
-                DecisionTree dtTest;
-                dtTest.train(trainSet, trainCount, reducedFeatureCount, d, ms);
-                ml_metrics_t m=dtTest.evaluate(testSet, testCount);
-                std::cout
-                        << "  DT d=" << (int)d << " ms=" << (int)ms
-                        << " -> " << std::fixed << std::setprecision(1)
-                        << (m.accuracy * 100) << "%" << std::endl;
-                if(m.accuracy > bestDTAcc){
-                    bestDTAcc=m.accuracy;
-                    bestDTDepth=d;
-                    bestDTMinSamples=ms;
+        Timer t("Decision Tree CV Search");
+        std::cout << "\n\n=== Decision Tree: feature count x hyperparameters ===" << std::endl;
+        for(int n : featureCounts){
+            CVStat bestN;
+            uint8_t bd = 0, bms = 0;
+            for(uint8_t d=6; d <= 14; d += 2){
+                for(uint8_t ms : {5, 10, 20, 30}){
+                    CVStat s = runCV(folds, [&](const Fold& f){
+                        QuietCout q;
+                        DecisionTree dtTest;
+                        dtTest.train(f.train.data(), f.train.size(), n, d, ms);
+                        return dtTest.evaluate(f.test.data(), f.test.size());
+                    });
+                    gridCsv << "dt," << n << "," << (int)d << "," << (int)ms << ",,," << s.mean << "," << s.std << "\n";
+                    if(s.mean > bestN.mean){ bestN = s; bd = d; bms = ms; }
                 }
             }
+            std::cout << "  features=" << std::setw(3) << n << "  best d=" << (int)bd << " ms=" << (int)bms
+                      << "  cv=" << pct(bestN.mean, bestN.std) << std::endl;
+            countCsv << "dt," << n << "," << bestN.mean << "," << bestN.std << ",d=" << (int)bd << " ms=" << (int)bms << "\n";
+            if(bestN.mean > dtCV.mean){
+                dtCV = bestN; dtFeat = n; finalDTDepth = bd; finalDTMinSamples = bms;
+            }
         }
-
-        std::cout << "\n  Best: d=" << (int)bestDTDepth << " ms=" << (int)bestDTMinSamples
-                  << " acc=" << (bestDTAcc * 100) << "%" << std::endl;
+        std::cout << "\n  Selected: " << dtFeat << " features, d=" << (int)finalDTDepth << " ms=" << (int)finalDTMinSamples
+                  << " cv=" << pct(dtCV.mean, dtCV.std) << std::endl;
     }
 
     DecisionTree dt;
-
-    uint8_t finalDTDepth=0, finalDTMinSamples=0;
-    float finalDTAcc=0.0f;
-    {
-        for(uint8_t d=6; d <= 14; d += 2){
-            for(uint8_t ms : {5, 10, 20, 30}){
-                DecisionTree dtTest;
-                dtTest.train(trainSet, trainCount, reducedFeatureCount, d, ms);
-                ml_metrics_t m=dtTest.evaluate(testSet, testCount);
-                if (m.accuracy > finalDTAcc){
-                    finalDTAcc=m.accuracy;
-                    finalDTDepth=d;
-                    finalDTMinSamples=ms;
-                }
-            }
-        }
-    }
-
-    dt.train(trainSet, trainCount, reducedFeatureCount, finalDTDepth, finalDTMinSamples);
+    dt.train(trainSet, trainCount, dtFeat, finalDTDepth, finalDTMinSamples);
     ml_metrics_t dtMetrics=dt.evaluate(testSet, testCount);
-    printMetrics(dtMetrics, "Decision Tree");
+    printMetrics(dtMetrics, "Decision Tree (holdout)");
     printPerClassMetrics(dtMetrics);
     printConfusionMatrix(dtMetrics);
 
     //========================================================
     //KNN
     //========================================================
-    std::cout << "\n=== Training KNN ===" << std::endl;
-    KNN knn;
-    knn.train(knnTrainSet, knnTrainCount);
-
-    uint8_t bestK=1;
-    float bestKnnAcc=0.0f;
+    int knnFeat = 0;
+    uint8_t bestK = 5;
+    CVStat knnCV;
     {
-        Timer t("KNN Search");
-        std::cout << std::endl;
-        for(int k=1; k <= 25; k += 2){
-            knn.setK(k);
-            ml_metrics_t m=knn.evaluate(testSet, testCount);
-            std::cout << "  K=" << std::setw(2) << k << ": "<< std::fixed << std::setprecision(1)<< (m.accuracy * 100) << "%" << std::endl;
-            if(m.accuracy > bestKnnAcc){
-                bestKnnAcc=m.accuracy;
-                bestK=k;
+        Timer t("KNN CV Search");
+        std::cout << "\n\n=== KNN: feature count x k ===" << std::endl;
+        for(int n : featureCounts){
+            CVStat bestN;
+            int bk = 5;
+            for(int k = 5; k <= 25; k += 2){
+                CVStat s = runCV(folds, [&](const Fold& f){
+                    KNN kf((uint8_t)k);
+                    kf.train(f.train.data(), f.train.size());
+                    return kf.evaluate(f.test.data(), f.test.size(), n);
+                });
+                gridCsv << "knn," << n << "," << k << ",,,," << s.mean << "," << s.std << "\n";
+                if(s.mean > bestN.mean){ bestN = s; bk = k; }
+            }
+            std::cout << "  features=" << std::setw(3) << n << "  best k=" << bk << "  cv=" << pct(bestN.mean, bestN.std) << std::endl;
+            countCsv << "knn," << n << "," << bestN.mean << "," << bestN.std << ",k=" << bk << "\n";
+            if(bestN.mean > knnCV.mean){
+                knnCV = bestN; knnFeat = n; bestK = bk;
             }
         }
+        std::cout << "\n  Selected: " << knnFeat << " features, k=" << (int)bestK << " cv=" << pct(knnCV.mean, knnCV.std) << std::endl;
     }
 
-    if(bestK < 5){
-        std::cout<<"  Overriding K="<<(int)bestK<< " -> K=5 for inference robustness"<< std::endl;
-        bestK=5;
-    }
-
-    knn.setK(bestK);
-    ml_metrics_t knnMetrics=knn.evaluate(testSet, testCount);
-    printMetrics(knnMetrics,"KNN");
+    KNN knn(bestK);
+    knn.train(trainSet, trainCount);
+    ml_metrics_t knnMetrics=knn.evaluate(testSet, testCount, knnFeat);
+    printMetrics(knnMetrics,"KNN (holdout)");
     printPerClassMetrics(knnMetrics);
     printConfusionMatrix(knnMetrics);
 
+    //========================================================
+    //KNN anomaly calibration]
+    //========================================================
     {
         std::cout << "\n=== KNN Distance Calibration ===" << std::endl;
-        
-        float class_avg_dist[SCENT_CLASS_COUNT] = {0};
-        int class_count[SCENT_CLASS_COUNT] = {0};
-        float max_inclass_dist = 0.0f;
-        float all_correct_dists[5000];
-        int total_correct = 0;
-        
-        for(uint16_t i = 0; i < testCount; i++){
-            float conf;
-            scent_class_t pred = knn.predictWithConfidence(testSet[i].features,reducedFeatureCount,conf);
-            
-            float dist_proxy = 1.0f - conf;
-            int cls = testSet[i].label;
-            
-            //only do correct preds
-            if(pred==cls&&cls<SCENT_CLASS_COUNT){
-                class_avg_dist[cls]+= dist_proxy;
-                class_count[cls]++;
-
-                if(total_correct<5000){
-                    all_correct_dists[total_correct++]=dist_proxy;
+        std::vector<float> meanDists(trainCount);
+        std::vector<float> d(trainCount);
+        for(uint16_t i = 0; i < trainCount; i++){
+            int n = 0;
+            for(uint16_t j = 0; j < trainCount; j++){
+                if(j == i) continue;
+                float s = 0.0f;
+                for(int f = 0; f < knnFeat; f++){
+                    float diff = trainSet[i].features[f] - trainSet[j].features[f];
+                    s += diff * diff;
                 }
+                d[n++] = sqrtf(s);
+            }
+            int k = std::min<int>(bestK, n);
+            std::partial_sort(d.begin(), d.begin() + k, d.begin() + n);
+            float sum = 0.0f;
+            for(int j = 0; j < k; j++) sum += d[j];
+            meanDists[i] = (k > 0) ? sum / k : 0.0f;
+        }
+        std::vector<float> sorted = meanDists;
+        std::sort(sorted.begin(), sorted.end());
+        float p50 = sorted[sorted.size() / 2];
+        float p95 = sorted[std::min<size_t>(sorted.size() - 1, (size_t)(sorted.size() * 0.95f))];
 
-                if(dist_proxy>max_inclass_dist){
-                    max_inclass_dist = dist_proxy;
-                }
-            }
-        }
-        
-        for(int c=0;c<SCENT_CLASS_COUNT;c++){
-            if(class_count[c]>0){
-                class_avg_dist[c]/=class_count[c];
-                std::cout << "  " << CSVLoader::getClassName((scent_class_t)c)
-                        << ": avg_dist=" << std::fixed << std::setprecision(4) 
-                        << class_avg_dist[c]
-                        << " (n=" << class_count[c] << ")" << std::endl;
-            }
-        }
-        
-        //use 95th percentile
-        std::sort(all_correct_dists, all_correct_dists + total_correct);
-        float p95_dist = (total_correct > 0)?all_correct_dists[(int)(total_correct * 0.95f)]:max_inclass_dist;
-        
-        float calibrated_threshold = p95_dist*1.5f;
-        float distance_scale = p95_dist*2.5f;
-        
-        std::cout << "  Max in-class dist: " << max_inclass_dist << std::endl;
-        std::cout << "  95th percentile:   " << p95_dist << std::endl;
-        std::cout << "  Anomaly threshold: " << calibrated_threshold << std::endl;
-        std::cout << "  Distance scale:    " << distance_scale << std::endl;
-        
-        //save
-        std::ofstream athf("anomaly_threshold.h");
+        //anomaly score on device = min(meanDist / KNN_DISTANCE_SCALE, 1)
+        float distance_scale = p95 * 2.5f;
+        float calibrated_threshold = (p95 * 1.5f) / distance_scale; //score units (= 0.6)
+
+        std::cout << "  Median LOO mean distance: " << std::setprecision(4) << p50 << std::endl;
+        std::cout << "  95th percentile:          " << p95 << std::endl;
+        std::cout << "  Distance scale:           " << distance_scale << std::endl;
+        std::cout << "  Anomaly threshold (score):" << calibrated_threshold << std::endl;
+
+        std::ofstream athf(outPath("anomaly_threshold.h"));
         athf << "#ifndef ANOMALY_THRESHOLD_H\n#define ANOMALY_THRESHOLD_H\n\n";
-        athf << "// Calibrated from " << total_correct 
-            << " correct test predictions\n";
-        athf << "static const float CALIBRATED_ANOMALY_THRESHOLD = " 
-            << std::setprecision(6) << calibrated_threshold << "f;\n";
-        athf << "static const float KNN_DISTANCE_SCALE = " 
-            << std::setprecision(6) << distance_scale 
-            << "f;  // replaces magic 5.0\n";
+        athf << "// Calibrated from leave-one-out " << (int)bestK << "-NN mean distances of " << trainCount << " training samples (" << knnFeat << " features)\n";
+        athf << "// anomaly score = min(mean neighbour distance / KNN_DISTANCE_SCALE, 1)\n";
+        athf << "// threshold is in score units (1.5 x the 95th percentile distance)\n";
+        athf << "static const float CALIBRATED_ANOMALY_THRESHOLD = " << cFloat(calibrated_threshold) << ";\n";
+        athf << "static const float KNN_DISTANCE_SCALE = " << cFloat(distance_scale) << ";\n";
         athf << "\n#endif\n";
     }
 
     //========================================================
     //RF
     //========================================================
-    std::cout << "\n=== Cross-Validated Random Forest Search ===" << std::endl;
-
-    csv_training_sample_t* rawSamples = loader.getSamples();
-    uint16_t rawCount = loader.getSampleCount();
-
-    csv_training_sample_t* cvSamples = new csv_training_sample_t[rawCount];
-    memcpy(cvSamples, rawSamples, rawCount * sizeof(csv_training_sample_t));
-    addEngineeredFeatures(cvSamples, rawCount, BASE_FEATURE_COUNT);
-
-    //apply Fisher projections
-    for(int p=0;p<numFisherPairs;p++){
-        int fi=preFisherFeatureCount+p;
-        for(uint16_t i=0; i<rawCount;i++){
-            float proj=0;
-            for(int f=0; f<fisherBaseFeat;f++){
-                proj += cvSamples[i].features[f]*fisherWeights[p][f];
-            }
-            cvSamples[i].features[fi]=proj;
-        }
-    }
-    std::cout<<"Built CV dataset: "<<rawCount<<" samples x "<< engineeredFeatureCount<<" features"<<std::endl;
-
     struct RFConfig {
+        int features;
         int trees;
         int depth;
         float sr;
         int minSamples;
-        float cvMean;
-        float cvStd;
+        CVStat cv;
     };
-    std::vector<RFConfig> rfConfigs;
+    RFConfig bestConfig{0, 0, 0, 0.0f, 0, CVStat()};
+
+    std::vector<int> treeGrid = QUICK_RF_GRID ? std::vector<int>{100, 200} : std::vector<int>{50, 100, 200, 500};
+    std::vector<int> depthGrid = QUICK_RF_GRID ? std::vector<int>{8, 0} : std::vector<int>{4, 6, 8, 10, 14, 0}; // 0 = unlimited
+    std::vector<float> srGrid = QUICK_RF_GRID ? std::vector<float>{0.3f, 0.5f, 0.7f} : std::vector<float>{0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.7f};
+    std::vector<int> msGrid = QUICK_RF_GRID ? std::vector<int>{3, 5} : std::vector<int>{1, 3, 5, 10};
 
     {
-        Timer t("Random Forest CV Grid Search");
-        std::cout << std::endl;
+        Timer t("Random Forest CV Search");
+        std::cout << "\n\n=== Random Forest: feature count x hyperparameters ("
+                  << treeGrid.size() * depthGrid.size() * srGrid.size() * msGrid.size() << " configs per count) ===" << std::endl;
+        auto searchStart = std::chrono::steady_clock::now();
 
-        for(int trees : {50, 100, 200, 500}){
-            for(int depth : {4, 6, 8, 10, 14, 0}){ // 0 = unlimited
-                for(float sr : {0.1f,0.2f,0.3f,0.4f,0.5f,0.7f}){
-                    for(int ms : {1, 3, 5, 10}){
-                        int actualDepth = (depth == 0) ? 255 : depth;
-
-                        std::cout << "\n  Config: t=" << trees << " d=" << depth<< " sr=" << sr<< " ms="<<ms<<std::endl;
-
-                        CVResults cv = crossValidateRF(cvSamples, rawCount,
-                        engineeredFeatureCount, 5,
-                        trees, actualDepth, ms, sr,
-                        feature_medians, feature_iqrs, selector);
-
-                        std::cout << "  => Mean: " << std::fixed << std::setprecision(1)
-                                  << (cv.meanAcc * 100) << "% +/- "
-                                  << (cv.stdAcc * 100) << "%" << std::endl;
-
-                        rfConfigs.push_back({trees, actualDepth, sr, ms, cv.meanAcc, cv.stdAcc});
+        for(size_t ci = 0; ci < featureCounts.size(); ci++){
+            int n = featureCounts[ci];
+            RFConfig bestN{n, 0, 0, 0.0f, 0, CVStat()};
+            for(int trees : treeGrid){
+                for(int depth : depthGrid){
+                    for(float sr : srGrid){
+                        for(int ms : msGrid){
+                            int actualDepth = (depth == 0) ? 255 : depth;
+                            CVStat s = runCV(folds, [&](const Fold& f){
+                                QuietCout q;
+                                RandomForest rf(trees, actualDepth, ms, sr);
+                                rf.train(f.train.data(), f.train.size(), n);
+                                return rf.evaluate(f.test.data(), f.test.size());
+                            });
+                            gridCsv << "rf," << n << "," << trees << "," << depth << "," << sr << "," << ms << ","
+                                    << s.mean << "," << s.std << "\n";
+                            //first maximum wins, so ties go to the smaller (earlier) configuration
+                            if(s.mean > bestN.cv.mean){
+                                bestN = {n, trees, actualDepth, sr, ms, s};
+                            }
+                        }
                     }
                 }
             }
+            double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - searchStart).count();
+            std::cout << "  features=" << std::setw(3) << n << "  best t=" << bestN.trees << " d=" << bestN.depth
+                      << " sr=" << std::setprecision(1) << bestN.sr << " ms=" << bestN.minSamples
+                      << "  cv=" << pct(bestN.cv.mean, bestN.cv.std)
+                      << "   [" << (ci + 1) << "/" << featureCounts.size() << ", " << std::setprecision(0) << elapsed / 60.0 << " min]" << std::endl;
+            countCsv << "rf," << n << "," << bestN.cv.mean << "," << bestN.cv.std << ",t=" << bestN.trees << " d=" << bestN.depth
+                     << " sr=" << bestN.sr << " ms=" << bestN.minSamples << "\n";
+            gridCsv.flush();
+            countCsv.flush();
+            if(bestN.cv.mean > bestConfig.cv.mean){
+                bestConfig = bestN;
+            }
         }
     }
+    const int rfFeat = bestConfig.features;
+    CVStat rfCV = bestConfig.cv;
 
-    auto bestConfig = std::max_element(rfConfigs.begin(), rfConfigs.end(),
-        [](const RFConfig& a, const RFConfig& b) { return a.cvMean < b.cvMean; });
+    std::cout << "\n  Selected: " << rfFeat << " features, t=" << bestConfig.trees
+            << " d=" << bestConfig.depth << " sr=" << bestConfig.sr
+            << " ms=" << bestConfig.minSamples
+            << " cv=" << pct(rfCV.mean, rfCV.std) << std::endl;
 
-    std::cout << "\nBest CV Config: t=" << bestConfig->trees
-            << " d=" << bestConfig->depth << " sr=" << bestConfig->sr
-            << " ms=" << bestConfig->minSamples
-            << " cv=" << std::fixed << std::setprecision(1)
-            << (bestConfig->cvMean * 100) << "% +/- "
-            << (bestConfig->cvStd * 100) << "%" << std::endl;
+    std::cout << "\nAggregate CV Results (best RF):" << std::endl;
+    printConfusionMatrix(rfCV.agg);
+    printPerClassMetrics(rfCV.agg);
 
-    //full cv
-    std::cout << "\nFull 5-fold CV with best config:" << std::endl;
-    CVResults bestCV = crossValidateRF(cvSamples, rawCount, 
-    engineeredFeatureCount, 5,
-    bestConfig->trees, bestConfig->depth, 
-    bestConfig->minSamples, bestConfig->sr,
-    feature_medians, feature_iqrs, selector);
-
-    std::cout << "\nAggregate CV Results:" << std::endl;
-    printConfusionMatrix(bestCV.aggregateMetrics);
-    printPerClassMetrics(bestCV.aggregateMetrics);
-
-    //final model
     std::cout << "\nTraining final model on full training set..." << std::endl;
-    RandomForest* bestRf = new RandomForest(bestConfig->trees, bestConfig->depth,
-        bestConfig->minSamples, bestConfig->sr);
-    bestRf->train(trainSet, trainCount, reducedFeatureCount);
+    RandomForest* bestRf = new RandomForest(bestConfig.trees, bestConfig.depth,
+        bestConfig.minSamples, bestConfig.sr);
+    bestRf->train(trainSet, trainCount, rfFeat);
     ml_metrics_t rfMetrics = bestRf->evaluate(testSet, testCount);
 
     printMetrics(rfMetrics, "Random Forest (holdout)");
@@ -2029,91 +2124,166 @@ m
     printConfusionMatrix(rfMetrics);
     bestRf->printFeatureImportance();
 
-    std::cout << "\nNOTE: CV accuracy (" << std::fixed << std::setprecision(1)
-              << (bestCV.meanAcc * 100) << "%) is more reliable than holdout ("
-              << (rfMetrics.accuracy * 100) << "%)" << std::endl;
+    //the exported selection only needs to cover the largest model
+    const int usedFeatures = std::max({dtFeat, knnFeat, rfFeat});
+    pipe.selector.selectedIndices.resize(usedFeatures);
+    pipe.selector.selectedCount = usedFeatures;
+    {
+        std::ostringstream note;
+        note << "ranked best-first: DT uses the first " << dtFeat << ", KNN the first " << knnFeat
+             << ", RF the first " << rfFeat;
+        pipe.selector.saveHeader(outPath("feature_select.h"), pipe.medians, pipe.iqrs, note.str());
+    }
+    writeStatsHeader(outPath("feature_stats.h"), pipe);
+    writeFisherHeader(outPath("fisher_weights.h"), pipe);
+    writeFeatureCsv(outPath("features_train.csv"), trainSet, trainCount, pipe.selector, usedFeatures);
+    writeFeatureCsv(outPath("features_test.csv"), testSet, testCount, pipe.selector, usedFeatures);
 
     //save
-    dt.saveModel("dt_model.bin");
-    bestRf->saveModel("rf_model.bin");
-    knn.saveModel("knn_model.bin");
-
-    //summary
-    std::cout << "\n=== Model Summary ===" << std::endl;
-    std::cout << "  Features: " << reducedFeatureCount << "/" << engineeredFeatureCount << " selected" << std::endl;
-    std::cout << "  Decision Tree:     " << std::fixed << std::setprecision(1) << (dtMetrics.accuracy * 100) << "%" << std::endl;
-    std::cout << "  KNN (K=" << (int)knn.getK() << "):         " << (knnMetrics.accuracy * 100) << "%" << std::endl;
-    std::cout << "  Random Forest:     "<<(rfMetrics.accuracy * 100) << "%" << std::endl;
-    std::cout << "  Hierarchical:      "<<(hierMetrics.accuracy * 100) << "%" << std::endl;
-
-    std::string bestModel="Decision Tree";
-    float bestAcc=dtMetrics.accuracy;
-
-    if (knnMetrics.accuracy > bestAcc){
-        bestAcc=knnMetrics.accuracy; bestModel="KNN";
-    }
-    if (rfMetrics.accuracy > bestAcc){
-        bestAcc=rfMetrics.accuracy; bestModel="Random Forest";
-    }
-    if (hierMetrics.accuracy > bestAcc){
-        bestAcc=hierMetrics.accuracy; bestModel="Hierarchical";
-    }
-    std::cout << "\n >> Best individual: " << bestModel << " (" << (bestAcc * 100) << "%)" << std::endl;
+    dt.getStats(); //fills in the tree depth stored in the binary
+    dt.saveModel(outPath("dt_model.bin").c_str());
+    bestRf->saveModel(outPath("rf_model.bin").c_str());
+    writeKnnBinary(outPath("knn_model.bin"), trainSet, trainCount, bestK, knnFeat);
 
     //===========================================================================================================
-    //ensemble
+    //experiments on the RF feature set (not deployed)
     //===========================================================================================================
+    twoStageExperiment(trainSet, trainCount, testSet, testCount, rfFeat);
+
+    HierarchicalClassifier hier;
+    ml_metrics_t hierMetrics;
     {
-        std::cout << "\n=== Weighted Ensemble Evaluation ===" << std::endl;
+        Timer t("Hierarchical Classifier");
+        std::cout << std::endl;
 
-        //weights
-        float dtW   = powf(dtMetrics.accuracy, 4);
-        float knnW  = powf(knnMetrics.accuracy, 4);
-        float rfW   = powf(rfMetrics.accuracy, 4);
-        float hierW = powf(hierMetrics.accuracy, 4);
+        hier.train(trainSet,trainCount,rfFeat);
+        hierMetrics = hier.evaluate(testSet, testCount);
 
-        std::cout << "  Weights: DT=" << std::fixed << std::setprecision(3) << dtW<<" KNN="<<knnW<<" RF=" << rfW<<" Hier="<<hierW<<std::endl;
+        printMetrics(hierMetrics,"Hierarchical Classifier (hard routing)");
+        printPerClassMetrics(hierMetrics);
+        printConfusionMatrix(hierMetrics);
+    }
 
-        ml_metrics_t ensMetrics;
-        memset(&ensMetrics, 0, sizeof(ensMetrics));
-        ensMetrics.total = testCount;
+    //===========================================================================================================
+    //ensemble (weights = CV acc^4, evaluated exactly as deployed
+    //===========================================================================================================
+    EnsembleWeights ensW{powf(dtCV.mean, 4), powf(knnCV.mean, 4), powf(rfCV.mean, 4)};
+    RejectMetrics ensHoldout;
+    CVStat ensCV;
+    float ensCVCoverage = 0.0f;
+    {
+        Timer t("Weighted Ensemble Evaluation");
+        std::cout << "\n\n=== Weighted Ensemble Evaluation (as deployed) ===" << std::endl;
+        std::cout << "  Weights (CV acc^4): DT=" << std::fixed << std::setprecision(3) << ensW.dt << " KNN=" << ensW.knn << " RF=" << ensW.rf << "  threshold=" << std::setprecision(2) << CONFIDENCE_THRESHOLD << std::endl;
 
+        ensHoldout = evaluateWithReject(testSet, testCount, [&](const float* x){
+            return deployedEnsemble(x, dt, knn, *bestRf, knnFeat, ensW, CONFIDENCE_THRESHOLD);
+        });
+        printMetrics(ensHoldout.m, "Weighted Ensemble (holdout, Unknown counted as wrong)");
+        std::cout << "Unknown outputs: " << ensHoldout.rejected << "/" << testCount << std::endl;
+        printPerClassMetrics(ensHoldout.m);
+        printConfusionMatrix(ensHoldout.m);
+
+        int cvRejected = 0, cvTotal = 0;
+        ensCV = runCV(folds, [&](const Fold& f){
+            QuietCout q;
+            DecisionTree fdt;
+            fdt.train(f.train.data(), f.train.size(), dtFeat, finalDTDepth, finalDTMinSamples);
+            KNN fknn(bestK);
+            fknn.train(f.train.data(), f.train.size());
+            RandomForest frf(bestConfig.trees, bestConfig.depth, bestConfig.minSamples, bestConfig.sr);
+            frf.train(f.train.data(), f.train.size(), rfFeat);
+            RejectMetrics r = evaluateWithReject(f.test.data(), f.test.size(), [&](const float* x){
+                return deployedEnsemble(x, fdt, fknn, frf, knnFeat, ensW, CONFIDENCE_THRESHOLD);
+            });
+            cvRejected += r.rejected;
+            cvTotal += r.m.total;
+            return r.m;
+        });
+
+        ensCVCoverage = (cvTotal > 0) ? 1.0f - (float)cvRejected / cvTotal : 0.0f;
+        std::cout << "\n  Ensemble CV: " << pct(ensCV.mean, ensCV.std)<< " (coverage " << std::setprecision(1) << (ensCVCoverage * 100) << "%)" << std::endl;
+
+        std::cout << "\n=== Holdout with " << CONFIDENCE_THRESHOLD << " confidence threshold (single-model mode) ===" << std::endl;
+        printReject("Decision Tree", evaluateWithReject(testSet, testCount, [&](const float* x){
+            float c; scent_class_t p = dt.predictWithConfidence(x, c);
+            return (c < CONFIDENCE_THRESHOLD) ? SCENT_CLASS_UNKNOWN : p;
+        }));
+
+        printReject("KNN", evaluateWithReject(testSet, testCount, [&](const float* x){
+            float c; scent_class_t p = knn.predictWithConfidence(x, knnFeat, c);
+            return (c < CONFIDENCE_THRESHOLD) ? SCENT_CLASS_UNKNOWN : p;
+        }));
+
+        printReject("Random Forest", evaluateWithReject(testSet, testCount, [&](const float* x){
+            float c; scent_class_t p = bestRf->predictWithConfidence(x, c);
+            return (c < CONFIDENCE_THRESHOLD) ? SCENT_CLASS_UNKNOWN : p;
+        }));
+        printReject("Ensemble", ensHoldout);
+
+        std::ofstream ef(outPath("ensemble_weights.h"));
+        ef << "#ifndef ENSEMBLE_WEIGHTS_H\n#define ENSEMBLE_WEIGHTS_H\n\n";
+        ef << "static const float DT_WEIGHT=" << cFloat(ensW.dt) << ";\n";
+        ef << "static const float KNN_WEIGHT=" << cFloat(ensW.knn) << ";\n";
+        ef << "static const float RF_WEIGHT=" << cFloat(ensW.rf) << ";\n";
+        ef << "\n#endif\n";
+    }
+
+    //===========================================================================================================
+    //summary
+    //===========================================================================================================
+    std::cout << "\n=== Model Summary ===" << std::endl;
+    std::cout << "  Exported features: " << usedFeatures << " (ranked) of " << fullFeatureCount << " candidates" << std::endl;
+    std::cout << "  " << std::left << std::setw(34) << "Model" << std::setw(10) << "Features" << std::setw(20) << "CV (train partition)" << "  Holdout" << std::right << std::endl;
+    auto row = [](const std::string& name, int feats, const CVStat& cv, float holdout){
+        std::cout << "  " << std::left << std::setw(34) << name << std::setw(10) << (feats > 0 ? std::to_string(feats) : std::string("-"))
+                  << std::setw(20) << pct(cv.mean, cv.std)
+                  << std::right << "  " << std::fixed << std::setprecision(1) << (holdout * 100) << "%" << std::endl;
+    };
+    row("Decision Tree (d=" + std::to_string(finalDTDepth) + ",ms=" + std::to_string(finalDTMinSamples) + ")", dtFeat, dtCV, dtMetrics.accuracy);
+    row("KNN (k=" + std::to_string(bestK) + ")", knnFeat, knnCV, knnMetrics.accuracy);
+    row("Random Forest (t=" + std::to_string(bestConfig.trees) + ",d=" + std::to_string(bestConfig.depth) + ")", rfFeat, rfCV, rfMetrics.accuracy);
+    row("Ensemble (deployed)", 0, ensCV, ensHoldout.m.accuracy);
+    std::cout << "  Hierarchical (hard, holdout): " << std::fixed << std::setprecision(1) << (hierMetrics.accuracy * 100) << "%" << std::endl;
+    if(NUM_SELECTED_FEATURES == 0){
+        std::cout << "  NOTE: CV figures are the best of the whole search, so slightly optimistic; the holdout is untouched." << std::endl;
+    }
+
+    {
+        std::ofstream rf(outPath("results.csv"));
+        rf << "features_requested,features_selected,split,seed,rf_grid,"
+           << "dt_features,dt_depth,dt_min_split,dt_cv_mean,dt_cv_std,dt_holdout,"
+           << "knn_features,knn_k,knn_cv_mean,knn_cv_std,knn_holdout,"
+           << "rf_features,rf_trees,rf_depth,rf_subset,rf_min_split,rf_cv_mean,rf_cv_std,rf_holdout,"
+           << "ens_cv_mean,ens_cv_std,ens_cv_coverage,ens_holdout,ens_holdout_coverage,hier_hard_holdout\n";
+        rf << std::fixed << std::setprecision(4)
+           << (NUM_SELECTED_FEATURES > 0 ? std::to_string(NUM_SELECTED_FEATURES) : std::string("auto")) << ","
+           << usedFeatures << "," << (SESSION_SPLIT ? "session" : "random") << ","
+           << RANDOM_SEED << "," << (QUICK_RF_GRID ? "quick" : "full") << ","
+           << dtFeat << "," << (int)finalDTDepth << "," << (int)finalDTMinSamples << "," << dtCV.mean << "," << dtCV.std << "," << dtMetrics.accuracy << ","
+           << knnFeat << "," << (int)bestK << "," << knnCV.mean << "," << knnCV.std << "," << knnMetrics.accuracy << ","
+           << rfFeat << "," << bestConfig.trees << "," << bestConfig.depth << "," << bestConfig.sr << "," << bestConfig.minSamples << ","
+           << rfCV.mean << "," << rfCV.std << "," << rfMetrics.accuracy << ","
+           << ensCV.mean << "," << ensCV.std << "," << ensCVCoverage << ","
+           << ensHoldout.m.accuracy << "," << ensHoldout.coverage() << "," << hierMetrics.accuracy << "\n";
+    }
+
+    //holdout features before scaling + trainer predictions
+    {
+        std::ofstream hc(outPath("holdout_check.csv"));
+        hc << "label,dt_pred,dt_conf,knn_pred,knn_conf,rf_pred,rf_conf,ens_pred,ens_conf";
+        for(int f = 0; f < engineeredFeatureCount; f++) hc << ",f" << f;
+        hc << "\n" << std::setprecision(9);
         for(uint16_t i = 0; i < testCount; i++){
-            scent_class_t actual = testSet[i].label;
-            scent_class_t pred = ensemblePredict(testSet[i].features,
-            dt, knn, *bestRf, hier,reducedFeatureCount,dtW, knnW, rfW, hierW);
-
-            if(pred==actual){
-                ensMetrics.correct++;
-            }
-            if(actual<SCENT_CLASS_COUNT&&pred<SCENT_CLASS_COUNT){
-                ensMetrics.confusionMatrix[actual][pred]++;
-            }
-        }
-        ensMetrics.accuracy = (ensMetrics.total > 0) ? (float)ensMetrics.correct / ensMetrics.total : 0.0f;
-
-        printMetrics(ensMetrics, "Weighted Ensemble");
-        printPerClassMetrics(ensMetrics);
-        printConfusionMatrix(ensMetrics);
-
-        //update best if ensemble wins
-        if(ensMetrics.accuracy > bestAcc){
-            bestAcc = ensMetrics.accuracy;
-            bestModel = "Weighted Ensemble";
-        }
-
-        std::cout << "\n >> Overall Best: " << bestModel << " (" 
-                  << std::fixed << std::setprecision(1) << (bestAcc * 100) << "%)" << std::endl;
-
-        // Save ensemble weights
-        {
-            std::ofstream ef("ensemble_weights.h");
-            ef << "#ifndef ENSEMBLE_WEIGHTS_H\n#define ENSEMBLE_WEIGHTS_H\n\n";
-            ef << "static const float DT_WEIGHT=" << dtW << "f;\n";
-            ef << "static const float KNN_WEIGHT=" << knnW << "f;\n";
-            ef << "static const float RF_WEIGHT=" << rfW << "f;\n";
-            ef << "static const float HIER_WEIGHT=" << hierW << "f;\n";
-            ef << "\n#endif\n";
+            float dc, kc, rc, ec;
+            int dp = dt.predictWithConfidence(testSet[i].features, dc);
+            int kp = knn.predictWithConfidence(testSet[i].features, knnFeat, kc);
+            int rp = bestRf->predictWithConfidence(testSet[i].features, rc);
+            int ep = deployedEnsemble(testSet[i].features, dt, knn, *bestRf, knnFeat, ensW, CONFIDENCE_THRESHOLD, &ec);
+            hc << (int)testSet[i].label << "," << dp << "," << dc << "," << kp << "," << kc << ","
+               << rp << "," << rc << "," << ep << "," << ec;
+            for(int f = 0; f < engineeredFeatureCount; f++) hc << "," << testEngineered[i].features[f];
+            hc << "\n";
         }
     }
 
@@ -2121,25 +2291,22 @@ m
     std::cout << "\nSample Predictions:" << std::endl;
     int sampleIdx=std::min((int)testCount, 5);
 
-    float dtW = dtMetrics.accuracy*dtMetrics.accuracy;
-    float knnW = knnMetrics.accuracy*knnMetrics.accuracy;
-    float rfW = rfMetrics.accuracy*rfMetrics.accuracy;
-    float hierW = hierMetrics.accuracy*hierMetrics.accuracy;
-
     for(int i=0; i < sampleIdx; i++){
         scent_class_t actual=testSet[i].label;
-        scent_class_t dtPred=dt.predict(testSet[i].features);
-        float knnConf, rfConf;
-        scent_class_t knnPred=knn.predictWithConfidence(testSet[i].features, reducedFeatureCount, knnConf);
+        float dtConf, knnConf, rfConf;
+        scent_class_t dtPred=dt.predictWithConfidence(testSet[i].features, dtConf);
+        scent_class_t knnPred=knn.predictWithConfidence(testSet[i].features, knnFeat, knnConf);
         scent_class_t rfPred=bestRf->predictWithConfidence(testSet[i].features, rfConf);
         scent_class_t hierPred = hier.predict(testSet[i].features);
-        scent_class_t ensPred = ensemblePredict(testSet[i].features,dt, knn, *bestRf, hier,reducedFeatureCount,dtW, knnW,rfW, hierW);
+        scent_class_t ensPred = deployedEnsemble(testSet[i].features, dt, knn, *bestRf, knnFeat, ensW, CONFIDENCE_THRESHOLD);
 
         std::cout
                 << "\n  Sample " << i << ": actual=" << CSVLoader::getClassName(actual)
-                << "\n    DT:       " << CSVLoader::getClassName(dtPred) << (dtPred == actual ? " [OK]" : " [X]")
+                << "\n    DT:       " << CSVLoader::getClassName(dtPred) << " ("
+                << std::fixed << std::setprecision(0) << (dtConf * 100) << "%)"
+                << (dtPred == actual ? " [OK]" : " [X]")
                 << "\n    KNN:      " << CSVLoader::getClassName(knnPred) << " ("
-                << std::fixed << std::setprecision(0) << (knnConf * 100) << "%)"
+                << (knnConf * 100) << "%)"
                 << (knnPred == actual ? " [OK]" : " [X]")
                 << "\n    RF:       " << CSVLoader::getClassName(rfPred) << " ("
                 << (rfConf * 100) << "%)" << (rfPred == actual ? " [OK]" : " [X]")
@@ -2151,12 +2318,8 @@ m
     }
 
     //cleanup
-    delete[] trainFull;
-    delete[] testFull;
     delete[] trainSet;
     delete[] testSet;
-    delete[] knnTrainSet;
-    delete[] cvSamples;
     delete bestRf;
 
     std::cout << "\nTraining complete." << std::endl;
@@ -2165,6 +2328,6 @@ m
     std::cerr.rdbuf(originalErrBuf);
     logFile.close();
 
-    std::cout << "\nOutput saved to training_output.txt" << std::endl;
+    std::cout << "\nOutput saved to " << outPath("training_output.txt") << std::endl;
     return 0;
 }

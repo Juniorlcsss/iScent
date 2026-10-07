@@ -11,6 +11,7 @@
 #define BASE_FEATURE_COUNT 82
 #define USE_ENV_FEATURES true
 #define CSV_FEATURE_COUNT 256
+#define BASELINE_SWEEPS 30
 
 
 //scent classes
@@ -55,12 +56,15 @@ public:
     //load data
     bool load(const std::string& filename);
 
-    //split data
-    void split(float ratio, csv_training_sample_t*& trainSet, uint16_t& trainCount,
+    void split(float ratio, uint32_t seed, bool bySession,
+        csv_training_sample_t*& trainSet, uint16_t& trainCount,
         csv_training_sample_t*& testSet, uint16_t& testCount);
 
     uint16_t getSampleCount() const { return _count; }
     csv_training_sample_t* getSamples() const { return _samples; }
+
+    const std::vector<float>& getGateDeviations() const { return _gateDeviations; }
+    const std::vector<float>& getCalibrationDeviations() const { return _calibrationDeviations; }
 
     void printInfo() const;
     static void printFeatureNames();
@@ -73,6 +77,10 @@ private:
     uint16_t _count;
     uint16_t _capacity;
     std::map<scent_class_t, uint16_t> _classCounts;
+    std::vector<int> _sessionIds; //collection run of each sample
+    std::vector<float> _gateDeviations;
+    std::vector<float> _calibrationDeviations;
+    bool _hasTimestamps = false;
     static std::string trim(const std::string& str);
     static std::string toLower(const std::string& str);
 };

@@ -8,6 +8,7 @@
 #include <cctype>
 #include <iomanip>
 #include <array>
+#include <set>
 #include <cmath>
 
 namespace{
@@ -28,20 +29,15 @@ struct RawSensorData{
     float gas2[10];
 };
 
-static float median(std::vector<float> &v){
+static float mean(const std::vector<float> &v){
     if(v.empty()){
         return 0.0f;
     }
-
-    const size_t mid = v.size() /2;
-    std::nth_element(v.begin(),v.begin()+mid, v.end());
-    float med = v[mid];
-
-    if(v.size()%2==0){
-        std::nth_element(v.begin(),v.begin()+mid-1, v.end());
-        med= 0.5f* (med+v[mid-1]);
+    double sum = 0.0;
+    for(float x : v){
+        sum += x;
     }
-    return med;
+    return (float)(sum / v.size());
 }
 
 static Baseline computeBaseline(const std::vector<RawSensorData> &cal){
@@ -68,16 +64,16 @@ static Baseline computeBaseline(const std::vector<RawSensorData> &cal){
         }
     }
 
-    b.temp1= median(temp1v);
-    b.temp2= median(temp2v);
-    b.hum1= median(hum1v);
-    b.hum2= median(hum2v);
-    b.pres1= median(pres1v);
-    b.pres2= median(pres2v);
+    b.temp1= mean(temp1v);
+    b.temp2= mean(temp2v);
+    b.hum1= mean(hum1v);
+    b.hum2= mean(hum2v);
+    b.pres1= mean(pres1v);
+    b.pres2= mean(pres2v);
     
     for(int i=0; i<NUM_HEATER_STEPS;i++){
-        b.gas1_steps[i]= median(gas1v[i]);
-        b.gas2_steps[i]= median(gas2v[i]);
+        b.gas1_steps[i]= mean(gas1v[i]);
+        b.gas2_steps[i]= mean(gas2v[i]);
         if(b.gas1_steps[i] < 1.0f){
             b.gas1_steps[i] = 1.0f;
         }
@@ -377,6 +373,10 @@ bool CSVLoader::load(const std::string& filename) {
         delete[] _samples;
     }
     _classCounts.clear();
+    _sessionIds.clear();
+    _gateDeviations.clear();
+    _calibrationDeviations.clear();
+    _hasTimestamps = false;
     _capacity = 50000;
     _samples = new csv_training_sample_t[_capacity];
     _count = 0;
@@ -384,14 +384,30 @@ bool CSVLoader::load(const std::string& filename) {
     std::string line;
     bool isHeader = true;
     int lineNum = 0, skipped = 0;
-    bool baselineReady = false;
-    Baseline baseline{};
-    std::vector<RawSensorData> calibrationRows;
+
+    //one block per run
+    std::vector<std::vector<RawSensorData>> calibrationBlocks;
+    bool inCalibration = false;
+    std::vector<RawSensorData> ambientRows;
+
+    struct ParsedRow {
+        scent_class_t label;
+        RawSensorData raw;
+        int session;
+        int calBlock; //most recent calibration
+    };
+    std::vector<ParsedRow> rows;
     
     //col
     int labelCol = 1;
     int featureStartCol = 2;
     int numGasSteps = 1;
+    int timestampCol = -1;
+
+    //session tracking
+    int sessionId = -1;
+    long long prevTimestamp = -1;
+    std::string prevLabel;
     
     while(std::getline(file, line)){
         lineNum++;
@@ -415,7 +431,11 @@ bool CSVLoader::load(const std::string& filename) {
                 if(col=="temp1"){
                     featureStartCol = i;
                 }
+                if(col=="timestamp"){
+                    timestampCol = i;
+                }
             }
+            _hasTimestamps = (timestampCol >= 0);
             
             int gasCount = 0;
             for(size_t i = featureStartCol; i < tokens.size(); i++){
@@ -436,7 +456,22 @@ bool CSVLoader::load(const std::string& filename) {
         
         //parse label
         std::string rawLabel = toLower(tokens[labelCol]);
+
+        long long timestamp = -1;
+        if(timestampCol >= 0 && timestampCol < (int)tokens.size()){
+            try { timestamp = std::stoll(tokens[timestampCol]); }
+            catch(...) { timestamp = -1; }
+        }
+        if(sessionId < 0 || rawLabel != prevLabel || (timestamp >= 0 && timestamp < prevTimestamp)){
+            sessionId++;
+        }
+        prevLabel = rawLabel;
+        prevTimestamp = timestamp;
         bool isCalibration = (rawLabel == "calibration" || rawLabel == "baseline");
+
+        if(!isCalibration){
+            inCalibration = false;
+        }
         
         scent_class_t label = isCalibration ? SCENT_CLASS_UNKNOWN : getClassFromName(tokens[labelCol]);
         
@@ -509,80 +544,192 @@ bool CSVLoader::load(const std::string& filename) {
         }
         
         if(isCalibration){
-            calibrationRows.push_back(raw);
-            baselineReady = false;
+            if(!inCalibration){
+                calibrationBlocks.emplace_back();
+                inCalibration = true;
+            }
+            calibrationBlocks.back().push_back(raw);
             continue;
-        } else if (!baselineReady && label == SCENT_CLASS_AMBIENT) {
-            calibrationRows.push_back(raw);
-            if (calibrationRows.size() < 10) {
-                continue; //wait
-            } else {
-                baseline = computeBaseline(calibrationRows);
-                baselineReady = true;
-                //dont clear
-            }
         }
 
-        if(!baselineReady){
-            baseline.temp1=20.0f; baseline.temp2=20.0f;
-            baseline.hum1=40.0f; baseline.hum2=40.0f;
-            baseline.pres1=1000.0f; baseline.pres2=1000.0f;
-
-            for(int i=0;i<NUM_HEATER_STEPS;i++){
-                baseline.gas1_steps[i]=1.0f;
-                baseline.gas2_steps[i]=1.0f;
-            }
-            baselineReady =true;
-            std::cout << "Warning: No ambient/calibration rows found, using neutral baseline 1.0.\n";
+        if(label == SCENT_CLASS_AMBIENT && (int)ambientRows.size() < BASELINE_SWEEPS){
+            ambientRows.push_back(raw);
         }
-        
-        csv_training_sample_t sample{};
-        sample.label = label;
-        applyMultiStepTransform(sample, raw, baseline);
-        
-        if(_count < _capacity){
-            _samples[_count++] = sample;
-            _classCounts[label]++;
-        } 
-        else {
-            break;
+        rows.push_back({label, raw, sessionId, (int)calibrationBlocks.size() - 1});
+    }
+
+    //first ambient sweeps give a single baseline for the whole file
+    std::vector<Baseline> baselines;
+    Baseline fallback{};
+    if(!calibrationBlocks.empty()){
+        std::cout << "Baseline: " << calibrationBlocks.size() << " calibration block(s), sweeps per block:";
+        for(const auto &block : calibrationBlocks){
+            baselines.push_back(computeBaseline(block));
+            std::cout << " " << block.size();
+        }
+        std::cout << std::endl;
+        fallback = baselines.front();
+
+        int before = 0;
+    
+        for(const ParsedRow &row : rows){
+            if(row.calBlock < 0) before++;
+        }
+
+        if(before > 0){
+            std::cout << "Warning: " << before << " rows come before the first calibration block; they use that block's baseline" << std::endl;
         }
     }
-    
+
+    else if(!ambientRows.empty()){
+        fallback = computeBaseline(ambientRows);
+        std::cout << "Baseline: mean of the first " << ambientRows.size() << " ambient sweeps" << std::endl;
+        if((int)ambientRows.size() < BASELINE_SWEEPS){
+            std::cout << "Warning: fewer than " << BASELINE_SWEEPS << " ambient sweeps available for the baseline" << std::endl;
+        }
+    }
+
+    else{
+        for(int i=0;i<NUM_HEATER_STEPS;i++){
+            fallback.gas1_steps[i]=1.0f;
+            fallback.gas2_steps[i]=1.0f;
+        }
+        std::cout << "Warning: No ambient/calibration rows found, using neutral baseline 1.0.\n";
+    }
+
+    auto baselineOf = [&](int block) -> const Baseline& {
+        return (block >= 0 && block < (int)baselines.size()) ? baselines[block] : fallback;
+    };
+
+    //
+    auto gateDeviation = [](const RawSensorData &raw, const Baseline &b) -> float {
+        float total = 0.0f;
+        int n = 0;
+        for(int i=0;i<NUM_HEATER_STEPS;i++){
+            if(b.gas1_steps[i] >= 1.0f){ total += fabsf(raw.gas1[i] / b.gas1_steps[i] - 1.0f); n++; }
+            if(b.gas2_steps[i] >= 1.0f){ total += fabsf(raw.gas2[i] / b.gas2_steps[i] - 1.0f); n++; }
+        }
+        return (n > 0) ? total / n : 0.0f;
+    };
+
+    //each calibration sweep against the baseline
+    _calibrationDeviations.clear();
+    if(!calibrationBlocks.empty()){
+        for(size_t k = 0; k < calibrationBlocks.size(); k++){
+            for(const RawSensorData &raw : calibrationBlocks[k]){
+                _calibrationDeviations.push_back(gateDeviation(raw, baselines[k]));
+            }
+        }
+    }
+    else{
+        for(const RawSensorData &raw : ambientRows){
+            _calibrationDeviations.push_back(gateDeviation(raw, fallback));
+        }
+    }
+
+    for(const ParsedRow &row : rows){
+        if(_count >= _capacity){
+            break;
+        }
+        const Baseline &baseline = baselineOf(row.calBlock);
+        csv_training_sample_t sample{};
+        sample.label = row.label;
+        applyMultiStepTransform(sample, row.raw, baseline);
+        _samples[_count++] = sample;
+        _classCounts[row.label]++;
+        _sessionIds.push_back(row.session);
+        _gateDeviations.push_back(gateDeviation(row.raw, baseline));
+    }
+
     file.close();
     std::cout << "Loaded " << _count << " samples (" << numGasSteps << " gas steps/sensor, " << skipped << " skipped)" << std::endl;
+    if(_hasTimestamps){
+        std::cout << "Detected " << (sessionId + 1) << " collection runs (label change or timestamp reset)" << std::endl;
+    }
     return _count > 0;
 }
 
-void CSVLoader::split(float ratio, csv_training_sample_t*& trainSet, uint16_t &trainCount, csv_training_sample_t*& testSet, uint16_t &testCount){
+void CSVLoader::split(float ratio, uint32_t seed, bool bySession, csv_training_sample_t*& trainSet, uint16_t &trainCount, csv_training_sample_t*& testSet, uint16_t &testCount){
     //group by class
     std::map<scent_class_t, std::vector<uint16_t>> classIndices;
     for(uint16_t i = 0; i < _count; i++){
         classIndices[_samples[i].label].push_back(i);
     }
 
-    std::random_device rd;
-    std::mt19937 g(rd());
+    std::mt19937 g(seed);
 
     std::vector<uint16_t> trainIdx, testIdx;
 
-    for(auto &i : classIndices){
-        //split each class
-        std::vector<uint16_t> &indices = i.second;
-        std::shuffle(indices.begin(), indices.end(), g);
+    if(bySession && !_hasTimestamps){
+        std::cout << "WARNING: no timestamp column, falling back to random split" << std::endl;
+        bySession = false;
+    }
 
-        uint16_t classTrain=(uint16_t)(indices.size() * ratio);
+    if(bySession){
+        std::cout << "Session-wise split (no run is shared between train and test)" << std::endl;
+        for(auto &c : classIndices){
+            std::vector<uint16_t> &indices = c.second;
+            std::vector<int> runs;
+            std::map<int, uint16_t> runSize;
+            for(uint16_t idx : indices){
+                int sid = _sessionIds[idx];
+                if(runSize.count(sid) == 0){
+                    runs.push_back(sid);
+                }
+                runSize[sid]++;
+            }
 
-        //ensure atleast 1 test per class
-        if(classTrain>=indices.size() &&indices.size()>1){
-            classTrain=indices.size()-1;
+            uint16_t target = (uint16_t)(indices.size() * ratio);
+            std::set<int> trainRuns;
+            uint16_t cum = 0;
+            for(size_t r = 0; r < runs.size(); r++){
+                //the first run is always used for training; stop at the first run that overshoots
+                if(r > 0 && cum + runSize[runs[r]] > target){
+                    break;
+                }
+                trainRuns.insert(runs[r]);
+                cum += runSize[runs[r]];
+            }
+            if(trainRuns.size() == runs.size()){
+                std::cout << "WARNING: " << getClassName(c.first) << " has only " << runs.size() << " run(s), none left for testing" << std::endl;
+            }
+
+            std::cout << "  " << getClassName(c.first) << " runs:";
+            for(int sid : runs){
+                std::cout << " " << runSize[sid] << (trainRuns.count(sid) ? "(train)" : "(test)");
+            }
+            std::cout << std::endl;
+
+            for(uint16_t idx : indices){
+                if(trainRuns.count(_sessionIds[idx])){
+                    trainIdx.push_back(idx);
+                }
+                else{
+                    testIdx.push_back(idx);
+                }
+            }
         }
+    }
+    
+    else{
+        for(auto &i : classIndices){
+            //split each class
+            std::vector<uint16_t> &indices = i.second;
+            std::shuffle(indices.begin(), indices.end(), g);
 
-        for(uint16_t i=0; i<classTrain;i++){
-            trainIdx.push_back(indices[i]);
-        }
-        for(uint16_t i=classTrain; i<indices.size();i++){
-            testIdx.push_back(indices[i]);
+            uint16_t classTrain=(uint16_t)(indices.size() * ratio);
+
+            //ensure atleast 1 test per class
+            if(classTrain>=indices.size() &&indices.size()>1){
+                classTrain=indices.size()-1;
+            }
+
+            for(uint16_t i=0; i<classTrain;i++){
+                trainIdx.push_back(indices[i]);
+            }
+            for(uint16_t i=classTrain; i<indices.size();i++){
+                testIdx.push_back(indices[i]);
+            }
         }
     }
 
